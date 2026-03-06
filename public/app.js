@@ -11,6 +11,7 @@ const ICONS = {
 // ── Global State ─────────────────────────────────────────────────
 let SERVER_ID = '';
 let TOKEN = '';
+let PLAYER_UUID = '';
 let API_BASE = '';
 let currentPage = 'market';
 let currentCategory = null;
@@ -138,6 +139,7 @@ async function waitForSession() {
 // ── Session Ready ────────────────────────────────────────────────
 
 function onSessionReady(player) {
+    PLAYER_UUID = player.uuid;
     // Player info
     document.getElementById('player-name').textContent = player.name;
     document.getElementById('player-avatar').style.backgroundImage =
@@ -505,6 +507,7 @@ function renderAuctions(auctions) {
         const remaining = a.expiration - now;
         const timeStr = remaining > 0 ? formatDuration(remaining) : 'Expired';
         const isExpiring = remaining > 0 && remaining < 300_000; // < 5min
+        const isOwner = a.sellerUuid === PLAYER_UUID;
 
         return `
         <div class="auction-card">
@@ -533,8 +536,11 @@ function renderAuctions(auctions) {
             <div class="auction-timer ${isExpiring ? 'expiring' : ''}">
                 ${ICONS.CLOCK} ${timeStr}
             </div>
-            <button class="btn-buy" style="margin: 10px 15px 15px; width: calc(100% - 30px); font-size: 13px; padding: 10px;" onclick="openAuctionModal(${a.id}, ${a.isBin}, '${esc(a.itemName)}', '${esc(a.material || 'stone')}', ${a.price}, '${esc(a.currencySymbol)}')">
-                ${a.isBin ? 'Buy It Now' : 'Place Bid'}
+            <button class="btn-buy" 
+                style="margin: 10px 15px 15px; width: calc(100% - 30px); font-size: 13px; padding: 10px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
+                ${isOwner ? 'disabled' : ''}
+                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${esc(a.itemName)}', '${esc(a.material || 'stone')}', ${a.price}, '${esc(a.currencySymbol)}')">
+                ${isOwner ? 'Your Auction' : (a.isBin ? 'Buy It Now' : 'Place Bid')}
             </button>
         </div>`;
     }).join('');
@@ -658,6 +664,7 @@ function renderOrders(orders) {
         const statusClass = o.status === 'ACTIVE' ? 'active' :
             o.status === 'FILLED' ? 'filled' : 'cancelled';
         const remaining = o.amountRequested - o.amountFilled;
+        const isOwner = o.buyerUuid === PLAYER_UUID;
 
         return `
         <tr>
@@ -679,8 +686,11 @@ function renderOrders(orders) {
                 </div>
             </td>
             <td>
-                <button class="btn-buy" style="padding: 6px 12px; font-size: 12px;" onclick="openOrderFillModal(${o.id}, '${esc(o.itemName)}', '${esc(o.material || 'stone')}', ${o.pricePerPiece}, '${esc(o.currencySymbol)}', ${remaining})">
-                    Fill Order
+                <button class="btn-buy" 
+                    style="padding: 6px 12px; font-size: 12px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
+                    ${isOwner ? 'disabled' : ''}
+                    onclick="openOrderFillModal(${o.id}, '${esc(o.itemName)}', '${esc(o.material || 'stone')}', ${o.pricePerPiece}, '${esc(o.currencySymbol)}', ${remaining})">
+                    ${isOwner ? 'Your Order' : 'Fill Order'}
                 </button>
             </td>
         </tr>`;
