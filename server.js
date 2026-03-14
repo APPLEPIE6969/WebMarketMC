@@ -10,6 +10,7 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 
@@ -403,17 +404,37 @@ app.use('/static', express.static(path.join(__dirname, 'public')));
 
 // Landing page
 app.get('/', (req, res) => {
+    const gaId = process.env.GA_MEASUREMENT_ID || 'G-RCQKF2LJVQ';
     res.send(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"><title>Aurelium Web Market</title>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=${gaId}"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+  gtag('config', '${gaId}');
+</script>
 <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#1a1a2e;color:#e0e0e0;font-family:Inter,sans-serif;}
 .box{text-align:center;padding:40px;border-radius:16px;background:rgba(255,255,255,.05);backdrop-filter:blur(10px);}
 h1{color:#f5c542;margin-bottom:8px;}p{color:#aaa;}</style></head>
 <body><div class="box"><h1>⚡ Aurelium Web Market</h1><p>Use <code>/web</code> in-game to get your dashboard link.</p></div></body></html>`);
 });
 
-// Dashboard entry point — serves index.html with server context
+// Dashboard entry point — serves index.html with GA4 injection
+let indexHtmlCache = null;
 app.get('/shop/:serverId', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    try {
+        if (!indexHtmlCache) {
+            indexHtmlCache = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+        }
+        const gaId = process.env.GA_MEASUREMENT_ID || 'G-RCQKF2LJVQ';
+        const finalHtml = indexHtmlCache.replace(/G-XXXXXXXXXX/g, gaId);
+        res.send(finalHtml);
+    } catch (e) {
+        console.error('Failed to serve index.html:', e);
+        res.status(500).send('Server Error');
+    }
 });
 
 // ══════════════════════════════════════════════════════════════════
