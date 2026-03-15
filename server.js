@@ -105,7 +105,7 @@ app.post('/api/register', (req, res) => {
                 registrationQueue.push(serverId);
             }
             const position = registrationQueue.indexOf(serverId) + 1;
-            console.log(`[Queue] Waitlisting ${serverName} (${serverId}). RAM at ${Math.round(rssMB)}MB. Queue pos: ${position}`);
+            console.log(`[Queue] Waitlisting "${serverName}" (${serverId}). RAM at ${Math.round(rssMB)}MB. Queue pos: ${position}`);
             return res.status(503).json({ error: 'Server waitlisted due to max RAM usage', queued: true, position });
         }
 
@@ -466,7 +466,7 @@ setInterval(() => {
     // Mark servers as stale if no sync in 5 minutes
     for (const [id, server] of servers) {
         if (now - server.lastSync > 300_000) {
-            console.log(`[Stale] Server ${id} hasn't synced in 5 minutes`);
+            console.log(`[Status] Server "${server.serverName}" (${id}) is now stale (no sync >5m)`);
         }
     }
 }, 60_000);

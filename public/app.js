@@ -297,11 +297,7 @@ async function selectCategory(catId, catName) {
     currentPageNum = 0;
     document.getElementById('search-input').value = '';
 
-    document.querySelectorAll('.sidebar-item').forEach((s, i) => {
-        const cats = document.querySelectorAll('.sidebar-item');
-        s.classList.toggle('active', s === cats[Array.from(cats).indexOf(s)] &&
-            s.querySelector('span').textContent === catName);
-    });
+
 
     // Simpler active highlighting
     document.querySelectorAll('.sidebar-item').forEach(s => {
@@ -370,9 +366,7 @@ function renderPagination(data, loadFn) {
 }
 
 function updateBreadcrumb(name) {
-    document.getElementById('breadcrumb').innerHTML = `
-        <span class="breadcrumb-item active">${name}</span>
-    `;
+    document.getElementById('breadcrumb').innerHTML = `<span class="breadcrumb-item active">${name}</span>`;
 }
 
 // ── Buy Modal ────────────────────────────────────────────────────
@@ -1020,15 +1014,20 @@ function drawChart(data, isPositive) {
     }
 
     // X-axis labels
+    // X-axis labels (with auto-thinning)
     ctx.textAlign = 'center';
-    const xTicks = Math.min(data.length, 8);
-    for (let i = 0; i < xTicks; i++) {
-        const idx = Math.floor(i * (data.length - 1) / (xTicks - 1));
-        const t = times[idx];
+    let lastLabelX = -100;
+    for (let i = 0; i < data.length; i++) {
+        const t = times[i];
         const x = xScale(t);
+        
+        // Ensure at least 70px spacing between labels to prevent overlap
+        if (x - lastLabelX < 70 && i !== data.length - 1) continue;
+
         const date = new Date(t);
         const label = `${date.getDate()} ${date.toLocaleString('en', { month: 'short' })}`;
         ctx.fillText(label, x, h - 10);
+        lastLabelX = x;
     }
 
     // ── Gradient fill ────────────────────────────────────────

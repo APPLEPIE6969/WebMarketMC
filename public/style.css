@@ -136,8 +136,8 @@ header {
 }
 
 .header-left {
-    flex-shrink: 0;
-    min-width: 180px;
+    flex: 1;
+    min-width: 0;
 }
 
 .logo {
@@ -167,9 +167,11 @@ header {
 }
 
 .header-right {
-    flex-shrink: 0;
+    flex: 1;
+    min-width: 0;
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 20px;
 }
 
@@ -186,6 +188,7 @@ header {
     border: 1px solid var(--border);
     cursor: default;
     transition: all 0.2s ease;
+    white-space: nowrap;
 }
 
 .refresh-timer.visible {
@@ -604,7 +607,7 @@ header {
 .auction-search-bar {
     position: relative;
     max-width: 480px;
-    margin: 0 32px 20px;
+    margin: 0 auto 24px;
 }
 
 .auction-grid {
