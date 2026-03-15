@@ -604,10 +604,18 @@ header {
    AUCTION HOUSE PAGE
    ═══════════════════════════════════════════════════════════════════ */
 
+.auction-controls {
+    display: flex;
+    gap: 12px;
+    padding: 0 32px 16px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
 .auction-search-bar {
     position: relative;
+    flex: 1;
     max-width: 480px;
-    margin: 0 auto 24px;
 }
 
 .auction-grid {

@@ -153,12 +153,14 @@
             </h2>
             <p class="page-subtitle">Browse active auctions — bid or buy in-game</p>
         </div>
-        <div class="auction-search-bar">
-            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="11" cy="11" r="8" />
-                <path d="m21 21-4.35-4.35" />
-            </svg>
-            <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
+        <div class="auction-controls">
+            <div class="auction-search-bar">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="m21 21-4.35-4.35" />
+                </svg>
+                <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
+            </div>
         </div>
         <div class="auction-grid" id="auction-grid"></div>
         <div class="empty-state" id="auction-empty" style="display:none;">
@@ -223,7 +225,14 @@
     <!-- ═══════ PAGE: STOCKS ═══════ -->
     <div class="page-content hidden" id="page-stocks">
         <div class="page-header-bar">
-            <h2>📈 Price Tracker</h2>
+            <h2>
+                <svg class="icon" style="width:24px;height:24px;margin-bottom:-4px;margin-right:8px;color:var(--blue)"
+                    viewBox="0 0 24 24">
+                    <polyline points="23 6 13.5 15.5 8.5 10.5 1 18" />
+                    <polyline points="17 6 23 6 23 12" />
+                </svg>
+                Price Tracker
+            </h2>
             <p class="page-subtitle">Live market prices and trends</p>
         </div>
         <div class="stocks-controls">
