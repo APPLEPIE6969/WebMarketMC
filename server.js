@@ -406,7 +406,7 @@ app.use('/static', express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => {
     const gaId = process.env.GA_MEASUREMENT_ID || 'G-RCQKF2LJVQ';
     res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Aurelium Web Market</title>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Aurelium Web Market</title>
 <!-- Google tag (gtag.js) -->
 <script async src="https://www.googletagmanager.com/gtag/js?id=${gaId}"></script>
 <script>
@@ -415,12 +415,33 @@ app.get('/', (req, res) => {
   gtag('js', new Date());
   gtag('config', '${gaId}');
 </script>
-<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#1a1a2e;color:#e0e0e0;font-family:Inter,sans-serif;}
-.box{text-align:center;padding:40px;border-radius:16px;background:rgba(255,255,255,.05);backdrop-filter:blur(10px);}
-h1{color:#f5c542;margin-bottom:8px;}p{color:#aaa;}
-.link-btn{display:inline-block;margin-top:20px;padding:10px 20px;background:#3b82f6;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;transition:background 0.2s;}
-.link-btn:hover{background:#2563eb;}</style></head>
-<body><div class="box"><h1>⚡ Aurelium Web Market</h1><p>Use <code>/web</code> in-game to get your dashboard link.</p><a href="https://modrinth.com/plugin/aurelium" target="_blank" class="link-btn">Download from Modrinth</a></div></body></html>`);
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:#111218; color:#e8e8ec; font-family:'Inter', sans-serif; }
+.box { text-align:center; padding:48px 40px; border-radius:12px; background:#1e1f25; border:1px solid #2d2e36; box-shadow:0 8px 32px rgba(0,0,0,0.5); max-width:400px; width:90%; }
+.logo { display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:24px; }
+.logo svg { width:32px; height:32px; color:#f59e0b; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
+.logo-title { font-size:24px; font-weight:800; background:linear-gradient(135deg, #f59e0b, #eab308); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0; }
+p { color:#9a9aad; font-size:15px; line-height:1.5; margin:0 0 32px 0; }
+code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; font-weight:600; font-family:monospace; border:1px solid #2d2e36; }
+.link-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:12px 24px; background:#3b82f6; color:#fff; text-decoration:none; border-radius:8px; font-weight:600; font-size:14px; transition:all 0.2s ease; width:100%; box-sizing:border-box; }
+.link-btn:hover { background:#2563eb; transform:translateY(-1px); box-shadow:0 4px 12px rgba(59,130,246,0.3); }
+</style></head>
+<body>
+<div class="box">
+    <div class="logo">
+        <svg viewBox="0 0 24 24"><path d="M14.5 2l7.5 7.5-7 7-7.5-7.5z"/><path d="M2 22l7-7"/><path d="M11 13l3.5-3.5"/></svg>
+        <h1 class="logo-title">Server Market</h1>
+    </div>
+    <p>Run <code>/web</code> in-game to get your personal dashboard link and start trading!</p>
+    <a href="https://modrinth.com/plugin/aurelium" target="_blank" class="link-btn">
+        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:18px;height:18px;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        Download Plugin
+    </a>
+</div>
+</body></html>`);
 });
 
 // Dashboard entry point — serves index.html with GA4 injection
