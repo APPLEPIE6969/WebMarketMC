@@ -417,8 +417,10 @@ app.get('/', (req, res) => {
 </script>
 <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#1a1a2e;color:#e0e0e0;font-family:Inter,sans-serif;}
 .box{text-align:center;padding:40px;border-radius:16px;background:rgba(255,255,255,.05);backdrop-filter:blur(10px);}
-h1{color:#f5c542;margin-bottom:8px;}p{color:#aaa;}</style></head>
-<body><div class="box"><h1>⚡ Aurelium Web Market</h1><p>Use <code>/web</code> in-game to get your dashboard link.</p></div></body></html>`);
+h1{color:#f5c542;margin-bottom:8px;}p{color:#aaa;}
+.link-btn{display:inline-block;margin-top:20px;padding:10px 20px;background:#3b82f6;color:#fff;text-decoration:none;border-radius:8px;font-weight:600;transition:background 0.2s;}
+.link-btn:hover{background:#2563eb;}</style></head>
+<body><div class="box"><h1>⚡ Aurelium Web Market</h1><p>Use <code>/web</code> in-game to get your dashboard link.</p><a href="https://modrinth.com/plugin/aurelium" target="_blank" class="link-btn">Download from Modrinth</a></div></body></html>`);
 });
 
 // Dashboard entry point — serves index.html with GA4 injection
