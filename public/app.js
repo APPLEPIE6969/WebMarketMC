@@ -214,6 +214,14 @@ function switchPage(page) {
 /** Silently refresh data on the current page without resetting scroll or UI state */
 async function refreshCurrentPage() {
     try {
+        // Always refresh player data for the balance header
+        const player = await api('/player');
+        if (player) {
+            const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+            const balEl = document.getElementById('balance-amount');
+            if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
+        }
+
         switch (currentPage) {
             case 'stocks': {
                 const [stocks, history] = await Promise.all([api('/stocks'), api('/price-history')]);
@@ -235,12 +243,24 @@ async function refreshCurrentPage() {
                 renderOrders(orders);
                 break;
             }
-            // Market doesn't need silent refresh (prices shown on click)
         }
     } catch (e) {
         // Silently fail — next interval will retry
     }
 }
+
+// Player Balance Refresh (Every 30 seconds as fallback)
+setInterval(async () => {
+    if (document.hidden || !TOKEN) return;
+    try {
+        const player = await api('/player');
+        if (player) {
+            const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+            const balEl = document.getElementById('balance-amount');
+            if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
+        }
+    } catch (e) {}
+}, 30000);
 
 // ═══════════════════════════════════════════════════════════════════
 // MARKET PAGE
@@ -837,7 +857,7 @@ function renderStocks(stocks) {
     renderStocksBody(getSortedStocks());
 }
 
-function renderStocksBody(stocks) {
+function renderStocksBody(stocks, isAppend = false) {
     const body = document.getElementById('stocks-body');
     if (!stocks || stocks.length === 0) {
         body.innerHTML = '<tr><td colspan="4" style="text-align:center;padding:40px;color:var(--text-muted)">No price data available</td></tr>';
@@ -848,9 +868,12 @@ function renderStocksBody(stocks) {
         stocksObserver.disconnect();
     }
 
-    const toRender = stocks.slice(0, stocksRenderCount);
+    // Determine slice range
+    const start = isAppend ? stocksRenderCount - 50 : 0;
+    const end = stocksRenderCount;
+    const toRender = stocks.slice(start, end);
 
-    body.innerHTML = toRender.map(s => {
+    const html = toRender.map(s => {
         const changeClass = s.change > 0.5 ? 'up' : s.change < -0.5 ? 'down' : 'neutral';
         const changeStr = s.change > 0 ? `+${s.change.toFixed(1)}%` : `${s.change.toFixed(1)}%`;
         const arrow = s.change > 0.5 ? ICONS.ARROW_UP : s.change < -0.5 ? ICONS.ARROW_DOWN : ICONS.ARROW_FLAT;
@@ -870,17 +893,26 @@ function renderStocksBody(stocks) {
         </tr>`;
     }).join('');
 
+    if (isAppend) {
+        // Remove the existing "Loading more..." row before appending
+        body.querySelector('.stocks-loader-row')?.remove();
+        body.insertAdjacentHTML('beforeend', html);
+    } else {
+        body.innerHTML = html;
+    }
+
     if (stocks.length > stocksRenderCount) {
         const loader = document.createElement('tr');
+        loader.className = 'stocks-loader-row';
         loader.innerHTML = '<td colspan="4" style="text-align:center;padding:15px;color:var(--text-muted)">Loading more...</td>';
         body.appendChild(loader);
 
         stocksObserver = new IntersectionObserver((entries) => {
             if (entries[0].isIntersecting) {
                 stocksRenderCount += 50;
-                renderStocksBody(stocks);
+                renderStocksBody(stocks, true);
             }
-        });
+        }, { rootMargin: '200px' });
         stocksObserver.observe(loader);
     }
 }

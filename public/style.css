@@ -964,6 +964,8 @@ header {
 .stocks-table tbody tr {
     transition: background var(--transition);
     cursor: pointer;
+    content-visibility: auto;
+    contain-intrinsic-size: 0 54px; /* Estimated height of a row */
 }
 
 .stocks-table tbody tr:hover {
