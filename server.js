@@ -138,7 +138,7 @@ app.post('/api/register', (req, res) => {
 
 /** POST /api/sync — MC plugin pushes market data + auctions + orders + stocks */
 app.post('/api/sync', requireApiKey, (req, res) => {
-    const { categories, items, auctions, orders, stocks, priceHistory } = req.body;
+    const { categories, items, auctions, orders, stocks, priceHistory, customItems } = req.body;
     const server = req.server;
 
     if (categories) server.categories = categories;
@@ -147,25 +147,32 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     // ── Custom Items from Aurelium Scanner ─────────────────
     // Merge scanner-discovered custom items into the dashboard.
     // Uses standard category/item model so sidebar + search work automatically.
-    if (body.customItems && body.customItems.length > 0) {
-        const mapped = body.customItems.map(item => ({
-            key: item.id || item.key || '',
-            name: item.name,
-            material: item.material || 'stone',
-            price: item.buyPrice || item.price || 0,
-            priceFormatted: (item.currencySymbol || '$') + (item.buyPrice || item.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-            currency: item.currency || '',
-            currencySymbol: item.currencySymbol || '$',
-        }));
-        server.items['CUSTOM_ITEMS'] = mapped;
-        if (!server.categories.find(c => c.id === 'CUSTOM_ITEMS')) {
+    // Merge scanner-discovered custom items — refreshed every sync
+    const mapped = (customItems || []).map(item => ({
+        key: item.id || item.key || '',
+        name: item.name,
+        material: item.material || 'stone',
+        price: item.buyPrice || item.price || 0,
+        priceFormatted: (item.currencySymbol || '$') + (item.buyPrice || item.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+        currency: item.currency || '',
+        currencySymbol: item.currencySymbol || '$',
+    }));
+    server.items['CUSTOM_ITEMS'] = mapped;
+    const catIdx = server.categories.findIndex(c => c.id === 'CUSTOM_ITEMS');
+    if (mapped.length > 0) {
+        if (catIdx === -1) {
             server.categories.push({
                 id: 'CUSTOM_ITEMS',
                 name: 'Custom Items',
                 icon: 'knowledge_book',
                 itemCount: mapped.length,
             });
+        } else {
+            server.categories[catIdx].itemCount = mapped.length;
         }
+    } else {
+        delete server.items['CUSTOM_ITEMS'];
+        if (catIdx !== -1) server.categories.splice(catIdx, 1);
     }
 
     // Store bulk data as raw JSON strings to minimize RAM footprint
