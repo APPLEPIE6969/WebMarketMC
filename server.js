@@ -145,18 +145,22 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     if (items) server.items = items;
 
     // ── Custom Items from Aurelium Scanner ─────────────────
-    // Merge scanner-discovered custom items into the dashboard.
-    // Uses standard category/item model so sidebar + search work automatically.
     // Merge scanner-discovered custom items — refreshed every sync
-    const mapped = (customItems || []).map(item => ({
-        key: item.id || item.key || '',
-        name: item.name,
-        material: item.material || 'stone',
-        price: item.buyPrice || item.price || 0,
-        priceFormatted: (item.currencySymbol || '$') + (item.buyPrice || item.price || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-        currency: item.currency || '',
-        currencySymbol: item.currencySymbol || '$',
-    }));
+    const safeItems = Array.isArray(customItems) ? customItems : [];
+    const mapped = safeItems
+        .filter(item => typeof item === 'object' && item !== null && typeof item.name === 'string')
+        .map(item => {
+            const price = item.buyPrice ?? item.price ?? 0;
+            return {
+                key: item.id ?? item.key ?? '',
+                name: item.name,
+                material: item.material ?? 'stone',
+                price,
+                priceFormatted: (item.currencySymbol ?? '$') + Number(price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+                currency: item.currency ?? '',
+                currencySymbol: item.currencySymbol ?? '$',
+            };
+        });
     server.items['CUSTOM_ITEMS'] = mapped;
     const catIdx = server.categories.findIndex(c => c.id === 'CUSTOM_ITEMS');
     if (mapped.length > 0) {
