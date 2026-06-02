@@ -307,10 +307,13 @@ app.get('/api/:serverId/search', requireSession, (req, res) => {
     if (!query) return res.status(400).json({ error: 'Missing search query' });
 
     const results = [];
+    const seen = new Set();
     const items = req.server.items || {};
     for (const catItems of Object.values(items)) {
         for (const item of catItems) {
-            if (item.name.toLowerCase().includes(query)) {
+            const key = item.key || item.name;
+            if (!seen.has(key) && item.name.toLowerCase().includes(query)) {
+                seen.add(key);
                 results.push(item);
             }
         }
@@ -481,6 +484,8 @@ code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; fo
 
 // Dashboard entry point — serves index.html with GA4 injection
 let indexHtmlCache = null;
+// Invalidate cache hourly so redeploys take effect without restart
+setInterval(() => { indexHtmlCache = null; }, 3600_000);
 app.get('/shop/:serverId', (req, res) => {
     try {
         if (!indexHtmlCache) {
@@ -521,10 +526,14 @@ setInterval(() => {
         if (p.status !== 'pending' && now - p.createdAt > 300_000) purchases.delete(id);
         else if (p.status === 'pending' && now - p.createdAt > 600_000) purchases.delete(id);
     }
-    // Mark servers as stale if no sync in 5 minutes
+    // Remove stale servers (no sync in 5 minutes, no active sessions)
     for (const [id, server] of servers) {
         if (now - server.lastSync > 300_000) {
-            console.log(`[Status] Server "${server.serverName}" (${id}) is now stale (no sync >5m)`);
+            const hasActive = [...sessions.values()].some(s => s.serverId === id);
+            if (!hasActive) {
+                console.log(`[Cleanup] Removing stale server "${server.serverName}" (${id})`);
+                servers.delete(id);
+            }
         }
     }
 }, 60_000);

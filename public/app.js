@@ -93,14 +93,31 @@ document.addEventListener('visibilitychange', () => {
     const countdownText = document.getElementById('refresh-countdown');
 
     if (document.hidden) {
-        // Tab hidden — full sleep: kill the auto-refresh interval entirely
+        // Tab hidden — full sleep: kill all intervals
         if (autoRefreshTimer) {
             clearInterval(autoRefreshTimer);
             autoRefreshTimer = null;
         }
+        if (balanceRefreshTimer) {
+            clearInterval(balanceRefreshTimer);
+            balanceRefreshTimer = null;
+        }
         if (countdownText) countdownText.innerHTML = ICONS.MOON;
     } else {
-        // Tab visible again — wake up: reload page data and restart timer
+        // Tab visible again — wake up: restart balance refresh + page data
+        if (!balanceRefreshTimer) {
+            balanceRefreshTimer = setInterval(async () => {
+                if (document.hidden || !TOKEN) return;
+                try {
+                    const player = await api('/player');
+                    if (player) {
+                        const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+                        const balEl = document.getElementById('balance-amount');
+                        if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
+                    }
+                } catch (e) {}
+            }, 30000);
+        }
         if (countdownText) countdownText.textContent = '...';
         switchPage(currentPage);
     }
@@ -174,6 +191,9 @@ function switchPage(page) {
     // Update tab styles
     document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
     document.querySelector(`.nav-tab[data-page="${page}"]`).classList.add('active');
+
+    // Cleanup stocks observer when leaving stocks page
+    if (stocksObserver) { stocksObserver.disconnect(); stocksObserver = null; }
 
     // Show/hide pages
     document.querySelectorAll('.page-content').forEach(p => p.classList.add('hidden'));
@@ -250,7 +270,7 @@ async function refreshCurrentPage() {
 }
 
 // Player Balance Refresh (Every 30 seconds as fallback)
-setInterval(async () => {
+let balanceRefreshTimer = setInterval(async () => {
     if (document.hidden || !TOKEN) return;
     try {
         const player = await api('/player');
@@ -301,10 +321,11 @@ function renderCategories(cats) {
     cats.forEach(cat => {
         const el = document.createElement('div');
         el.className = 'sidebar-item';
+        el.dataset.catId = cat.id;
         el.innerHTML = `
             <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
                  style="image-rendering:pixelated" onerror="this.style.display='none'">
-            <span>${cat.name}</span>
+            <span>${esc(cat.name)}</span>
             <span class="item-count">${cat.itemCount}</span>
         `;
         el.addEventListener('click', () => selectCategory(cat.id, cat.name));
@@ -319,10 +340,9 @@ async function selectCategory(catId, catName) {
 
 
 
-    // Simpler active highlighting
+    // Active highlighting by category id
     document.querySelectorAll('.sidebar-item').forEach(s => {
-        const name = s.querySelector('span').textContent;
-        s.classList.toggle('active', name === catName);
+        s.classList.toggle('active', s.dataset.catId === catId);
     });
 
     updateBreadcrumb(catName);
@@ -356,13 +376,13 @@ function renderItems(items) {
     empty.style.display = 'none';
 
     grid.innerHTML = items.map(item => `
-        <div class="item-card" onclick="openBuyModal('${esc(item.key)}','${esc(item.name)}',${item.price},'${esc(item.priceFormatted)}','${esc(item.currency)}','${esc(item.material)}')">
+        <div class="item-card" onclick="openBuyModal('${escJs(item.key)}','${escJs(item.name)}',${item.price},'${escJs(item.priceFormatted)}','${escJs(item.currency)}','${escJs(item.material)}')">
             <div class="item-card-header">
                 <div class="item-icon">
                     <img src="${IMG_BASE}${item.material?.toLowerCase() || 'stone'}"
-                         onerror="handleItemIconError(this, '${esc(item.material || 'stone')}')" alt="">
+                         onerror="handleItemIconError(this, '${escJs(item.material || 'stone')}')" alt="">
                 </div>
-                <div class="item-name">${item.name}</div>
+                <div class="item-name">${esc(item.name)}</div>
             </div>
             <div class="item-card-footer">
                 <span class="item-price">${item.priceFormatted}</span>
@@ -480,6 +500,8 @@ async function pollPurchase(purchaseId) {
             }
         } catch (_) { /* retry */ }
     }
+    // Timed out after 30s — purchase may still complete server-side
+    showToast('warn', 'Purchase taking longer than expected. Check in-game.');
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -529,10 +551,10 @@ function renderAuctions(auctions) {
             <div class="auction-card-header">
                 <div class="auction-item-icon">
                     <img src="${IMG_BASE}${a.material?.toLowerCase() || 'stone'}"
-                         onerror="handleItemIconError(this, '${esc(a.material || 'stone')}')" alt="">
+                         onerror="handleItemIconError(this, '${escJs(a.material || 'stone')}')" alt="">
                 </div>
                 <div class="auction-item-info">
-                    <div class="auction-item-name">${a.itemName}</div>
+                    <div class="auction-item-name">${esc(a.itemName)}</div>
                     <div class="auction-item-amount">${a.amount > 1 ? `x${a.amount}` : ''} by ${a.seller}</div>
                 </div>
             </div>
@@ -553,7 +575,7 @@ function renderAuctions(auctions) {
             <button class="btn-buy" 
                 style="margin: 10px 15px 15px; width: calc(100% - 30px); font-size: 13px; padding: 10px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
                 ${isOwner ? 'disabled' : ''}
-                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${esc(a.itemName)}', '${esc(a.material || 'stone')}', ${a.price}, '${esc(a.currencySymbol)}')">
+                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${escJs(a.itemName)}', '${escJs(a.material || 'stone')}', ${a.price}, '${escJs(a.currencySymbol)}')">
                 ${isOwner ? 'Your Auction' : (a.isBin ? 'Buy It Now' : 'Place Bid')}
             </button>
         </div>`;
@@ -685,8 +707,8 @@ function renderOrders(orders) {
             <td>
                 <div class="order-item-cell">
                     <img class="order-item-icon" src="${IMG_BASE}${o.material?.toLowerCase() || 'stone'}"
-                         loading="lazy" onerror="handleItemIconError(this, '${esc(o.material || 'stone')}', true)" alt="">
-                    <span class="order-item-name">${o.itemName}</span>
+                         loading="lazy" onerror="handleItemIconError(this, '${escJs(o.material || 'stone')}', true)" alt="">
+                    <span class="order-item-name">${esc(o.itemName)}</span>
                 </div>
             </td>
             <td>${o.buyer}</td>
@@ -703,7 +725,7 @@ function renderOrders(orders) {
                 <button class="btn-buy" 
                     style="padding: 6px 12px; font-size: 12px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
                     ${isOwner ? 'disabled' : ''}
-                    onclick="openOrderFillModal(${o.id}, '${esc(o.itemName)}', '${esc(o.material || 'stone')}', ${o.pricePerPiece}, '${esc(o.currencySymbol)}', ${remaining})">
+                    onclick="openOrderFillModal(${o.id}, '${escJs(o.itemName)}', '${escJs(o.material || 'stone')}', ${o.pricePerPiece}, '${escJs(o.currencySymbol)}', ${remaining})">
                     ${isOwner ? 'Your Order' : 'Fill Order'}
                 </button>
             </td>
@@ -879,12 +901,12 @@ function renderStocksBody(stocks, isAppend = false) {
         const arrow = s.change > 0.5 ? ICONS.ARROW_UP : s.change < -0.5 ? ICONS.ARROW_DOWN : ICONS.ARROW_FLAT;
 
         return `
-        <tr onclick="openStockChart('${esc(s.key)}','${esc(s.name)}','${esc(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${esc(s.currencySymbol)}')">
+        <tr onclick="openStockChart('${escJs(s.key)}','${escJs(s.name)}','${escJs(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${escJs(s.currencySymbol)}')">
             <td>
                 <div class="stock-item-cell">
                     <img class="stock-item-icon" src="${IMG_BASE}${s.material?.toLowerCase() || 'stone'}"
-                         loading="lazy" onerror="handleItemIconError(this, '${esc(s.material || 'stone')}', true)" alt="">
-                    <span>${s.name}</span>
+                         loading="lazy" onerror="handleItemIconError(this, '${escJs(s.material || 'stone')}', true)" alt="">
+                    <span>${esc(s.name)}</span>
                 </div>
             </td>
             <td style="color:var(--accent);font-weight:600">${s.buyPrice > 0 ? s.currencySymbol + s.buyPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</td>
@@ -932,7 +954,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
         <div class="chart-modal">
             <div class="chart-modal-header">
                 <h3>
-                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${esc(material || 'stone')}', true)" alt="">
+                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
                     ${name}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
@@ -1170,6 +1192,10 @@ function drawChart(data, isPositive) {
 
 async function api(endpoint) {
     const resp = await fetch(`${API_BASE}${endpoint}`, { headers: AUTH_HEADERS() });
+    if (resp.status === 401) {
+        showError('Session expired. Use /web in-game to get a new link.');
+        return null;
+    }
     if (!resp.ok) throw new Error(`API ${resp.status}`);
     return resp.json();
 }
@@ -1189,9 +1215,24 @@ function showError(msg) {
 }
 
 function esc(str) {
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/`/g, '&#96;');
+}
+
+/** Escape for use inside JS string literals (onclick handlers) */
+function escJs(str) {
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/`/g, '\\`')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r');
 }
 
 function debounce(fn, ms) {
