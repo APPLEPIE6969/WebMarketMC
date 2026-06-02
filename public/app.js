@@ -43,7 +43,10 @@ function handleItemIconError(img, material, hideOnFail = false) {
         if (hideOnFail) {
             img.style.display = 'none';
         } else {
-            img.parentElement.innerHTML = ICONS.BOX;
+            // Replace only the img, not the parent (preserves modal layout)
+            const fallback = document.createElement('div');
+            fallback.innerHTML = ICONS.BOX.trim();
+            img.replaceWith(fallback.firstElementChild || fallback);
         }
     }
 }
@@ -57,7 +60,7 @@ function showError(msg) {
             ${ICONS.LOCK}
             <h2 style="color:#f5c542;margin:0 0 12px;">Session Required</h2>
             <p style="color:#aaa;font-size:15px;line-height:1.6;margin:0;">
-                ${msg}<br><br>
+                ${esc(msg)}<br><br>
                 Type <code style="background:rgba(255,255,255,.1);padding:2px 8px;border-radius:4px;color:#f5c542;">/web</code>
                 or <code style="background:rgba(255,255,255,.1);padding:2px 8px;border-radius:4px;color:#f5c542;">/market web</code>
                 in-game to get a dashboard link.
@@ -236,6 +239,8 @@ async function refreshCurrentPage() {
     try {
         // Always refresh player data for the balance header
         const player = await api('/player');
+    if (!player) return;
+        if (!player) throw new Error('Session expired');
         if (player) {
             const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
             const balEl = document.getElementById('balance-amount');
@@ -256,13 +261,15 @@ async function refreshCurrentPage() {
             case 'auction': {
                 const auctions = await api('/auctions');
                 renderAuctions(auctions);
-                break;
+      const auctions = await api('/auctions');
+      if (!auctions) break;
             }
             case 'orders': {
                 const orders = await api('/orders');
                 renderOrders(orders);
                 break;
-            }
+      const orders = await api('/orders');
+      if (!orders) break;
         }
     } catch (e) {
         // Silently fail — next interval will retry
@@ -274,6 +281,7 @@ let balanceRefreshTimer = setInterval(async () => {
     if (document.hidden || !TOKEN) return;
     try {
         const player = await api('/player');
+        if (!player) throw new Error('Session expired');
         if (player) {
             const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
             const balEl = document.getElementById('balance-amount');
@@ -289,7 +297,8 @@ let balanceRefreshTimer = setInterval(async () => {
 async function loadMarketPage() {
     try {
         const cats = await api('/categories');
-        renderCategories(cats);
+    const cats = await api('/categories');
+    if (!cats) return;
         if (cats.length > 0) {
             selectCategory(cats[0].id, cats[0].name);
         }
@@ -406,7 +415,7 @@ function renderPagination(data, loadFn) {
 }
 
 function updateBreadcrumb(name) {
-    document.getElementById('breadcrumb').innerHTML = `<span class="breadcrumb-item active">${name}</span>`;
+    document.getElementById('breadcrumb').innerHTML = `<span class="breadcrumb-item active">${esc(name)}</span>`;
 }
 
 // ── Buy Modal ────────────────────────────────────────────────────
@@ -419,7 +428,7 @@ function openBuyModal(key, name, price, formatted, currency, material) {
     document.getElementById('modal-item-price').textContent = formatted;
     document.getElementById('modal-icon').innerHTML =
         `<img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" width="36" height="36" style="image-rendering:pixelated"
-              onerror="handleItemIconError(this, '${esc(material || 'stone')}')">`;
+              onerror="handleItemIconError(this, '${escJs(material || 'stone')}')">`;
     document.getElementById('amount-input').value = 1;
     updateModalTotal();
     document.getElementById('buy-modal').style.display = '';
@@ -604,7 +613,7 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
     document.getElementById('auction-modal-item-price').textContent = isBin ? `Price: ${currencyStr}${price.toLocaleString()}` : `Current: ${currencyStr}${price.toLocaleString()}`;
 
     const iconEl = document.getElementById('auction-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${material}" onerror="handleItemIconError(this, '${material}', true)">`;
+    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('auction-amount-input');
     if (isBin) {
@@ -742,7 +751,7 @@ function openOrderFillModal(id, name, material, price, currencyStr, maxAmount) {
     document.getElementById('order-fill-modal-item-price').textContent = `Payout: ${currencyStr}${price.toLocaleString()} each`;
 
     const iconEl = document.getElementById('order-fill-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${material}" onerror="handleItemIconError(this, '${material}', true)">`;
+    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('order-fill-amount-input');
     input.value = 1;
@@ -837,6 +846,7 @@ async function loadStocksPage() {
             api('/stocks'),
             api('/price-history')
         ]);
+    if (!stocks) return;
         stocksData = stocks;
         priceHistory = history || {};
         renderStocks(stocksData);
@@ -1207,11 +1217,6 @@ function showToast(type, msg) {
     toast.textContent = msg;
     container.appendChild(toast);
     setTimeout(() => toast.remove(), 4000);
-}
-
-function showError(msg) {
-    const overlay = document.getElementById('loading-overlay');
-    overlay.querySelector('p').textContent = msg;
 }
 
 function esc(str) {

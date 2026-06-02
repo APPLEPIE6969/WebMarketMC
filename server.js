@@ -33,7 +33,7 @@ app.use('/api/', rateLimit({
     legacyHeaders: false,
     message: { error: 'Too many requests, please slow down.' },
     // Skip rate limiting for MC servers that provide a valid API Key
-    skip: (req) => req.headers['x-api-key'] !== undefined
+    skip: (req) => { const sid = req.headers['x-server-id']; const s = servers.get(sid); return s && s.apiKey === req.headers['x-api-key']; }
 }));
 
 // ── In-Memory Data Stores ────────────────────────────────────────
@@ -80,6 +80,10 @@ function requireApiKey(req, res, next) {
 
 /** POST /api/register — MC plugin registers on startup */
 app.post('/api/register', (req, res) => {
+  const regSecret = process.env.REGISTRATION_SECRET || '';
+  if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+    return res.status(403).json({ error: 'Invalid registration secret' });
+  }
     const { serverId, apiKey, serverName } = req.body;
 
     if (!serverId || !apiKey) {
@@ -186,7 +190,7 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     if (priceHistory) server.priceHistoryJson = JSON.stringify(priceHistory);
     server.lastSync = Date.now();
 
-    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId) });
+    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId).map(p => ({ id: p.id, itemKey: p.itemKey, amount: p.amount, currency: p.currency, status: p.status })) });
 });
 
 /** POST /api/session — MC plugin creates a player session */
@@ -384,7 +388,7 @@ app.post('/api/:serverId/bid', requireSession, (req, res) => {
         playerUuid: req.session.playerUuid,
         type: 'bid',
         auctionId: parseInt(auctionId),
-        amount: parseFloat(amount),
+        amount: isNaN(parseFloat(amount)) ? 0 : parseFloat(amount),
         status: 'pending',
         createdAt: Date.now(),
     });
@@ -396,7 +400,7 @@ app.post('/api/:serverId/bid', requireSession, (req, res) => {
 app.post('/api/:serverId/fill-order', requireSession, (req, res) => {
     const { orderId, amount } = req.body;
 
-    if (!orderId || amount == null || amount <= 0) {
+    if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
         return res.status(400).json({ error: 'Invalid order or amount' });
     }
 
@@ -504,10 +508,10 @@ app.get('/shop/:serverId', (req, res) => {
 // HELPERS
 // ══════════════════════════════════════════════════════════════════
 
-function getPendingPurchases(serverId) {
+function getPendingPurchases(serverId, playerUuid) {
     const pending = [];
     for (const [id, p] of purchases) {
-        if (p.serverId === serverId && p.status === 'pending') {
+        if (p.serverId === serverId && p.status === 'pending' && (!playerUuid || p.playerUuid === playerUuid)) {
             pending.push({ id, ...p });
         }
     }
