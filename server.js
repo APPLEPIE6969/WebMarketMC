@@ -33,7 +33,7 @@ app.use('/api/', rateLimit({
     legacyHeaders: false,
     message: { error: 'Too many requests, please slow down.' },
     // Skip rate limiting for MC servers that provide a valid API Key
-    skip: (req) => req.headers['x-api-key'] !== undefined
+    skip: (req) => { const sid = req.headers['x-server-id']; const s = servers.get(sid); return s && s.apiKey === req.headers['x-api-key']; }
 }));
 
 // ── In-Memory Data Stores ────────────────────────────────────────
@@ -80,6 +80,10 @@ function requireApiKey(req, res, next) {
 
 /** POST /api/register — MC plugin registers on startup */
 app.post('/api/register', (req, res) => {
+  const regSecret = process.env.REGISTRATION_SECRET || '';
+  if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+    return res.status(403).json({ error: 'Invalid registration secret' });
+  }
     const { serverId, apiKey, serverName } = req.body;
 
     if (!serverId || !apiKey) {
@@ -138,11 +142,46 @@ app.post('/api/register', (req, res) => {
 
 /** POST /api/sync — MC plugin pushes market data + auctions + orders + stocks */
 app.post('/api/sync', requireApiKey, (req, res) => {
-    const { categories, items, auctions, orders, stocks, priceHistory } = req.body;
+    const { categories, items, auctions, orders, stocks, priceHistory, customItems } = req.body;
     const server = req.server;
 
     if (categories) server.categories = categories;
     if (items) server.items = items;
+
+    // ── Custom Items from Aurelium Scanner ─────────────────
+    // Merge scanner-discovered custom items — refreshed every sync
+    const safeItems = Array.isArray(customItems) ? customItems : [];
+    const mapped = safeItems
+        .filter(item => typeof item === 'object' && item !== null && typeof item.name === 'string')
+        .map(item => {
+            const price = item.buyPrice ?? item.price ?? 0;
+            return {
+                key: item.id ?? item.key ?? '',
+                name: item.name,
+                material: item.material ?? 'stone',
+                price,
+                priceFormatted: (item.currencySymbol ?? '$') + Number(price).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+                currency: item.currency ?? '',
+                currencySymbol: item.currencySymbol ?? '$',
+            };
+        });
+    server.items['CUSTOM_ITEMS'] = mapped;
+    const catIdx = server.categories.findIndex(c => c.id === 'CUSTOM_ITEMS');
+    if (mapped.length > 0) {
+        if (catIdx === -1) {
+            server.categories.push({
+                id: 'CUSTOM_ITEMS',
+                name: 'Custom Items',
+                icon: 'knowledge_book',
+                itemCount: mapped.length,
+            });
+        } else {
+            server.categories[catIdx].itemCount = mapped.length;
+        }
+    } else {
+        delete server.items['CUSTOM_ITEMS'];
+        if (catIdx !== -1) server.categories.splice(catIdx, 1);
+    }
 
     // Store bulk data as raw JSON strings to minimize RAM footprint
     if (auctions) server.auctionsJson = JSON.stringify(auctions);
@@ -151,7 +190,7 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     if (priceHistory) server.priceHistoryJson = JSON.stringify(priceHistory);
     server.lastSync = Date.now();
 
-    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId) });
+    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId).map(p => ({ id: p.id, itemKey: p.itemKey, amount: p.amount, currency: p.currency, status: p.status })) });
 });
 
 /** POST /api/session — MC plugin creates a player session */
@@ -272,10 +311,13 @@ app.get('/api/:serverId/search', requireSession, (req, res) => {
     if (!query) return res.status(400).json({ error: 'Missing search query' });
 
     const results = [];
+    const seen = new Set();
     const items = req.server.items || {};
     for (const catItems of Object.values(items)) {
         for (const item of catItems) {
-            if (item.name.toLowerCase().includes(query)) {
+            const key = item.key || item.name;
+            if (!seen.has(key) && item.name.toLowerCase().includes(query)) {
+                seen.add(key);
                 results.push(item);
             }
         }
@@ -346,7 +388,7 @@ app.post('/api/:serverId/bid', requireSession, (req, res) => {
         playerUuid: req.session.playerUuid,
         type: 'bid',
         auctionId: parseInt(auctionId),
-        amount: parseFloat(amount),
+        amount: isNaN(parseFloat(amount)) ? 0 : parseFloat(amount),
         status: 'pending',
         createdAt: Date.now(),
     });
@@ -358,7 +400,7 @@ app.post('/api/:serverId/bid', requireSession, (req, res) => {
 app.post('/api/:serverId/fill-order', requireSession, (req, res) => {
     const { orderId, amount } = req.body;
 
-    if (!orderId || amount == null || amount <= 0) {
+    if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
         return res.status(400).json({ error: 'Invalid order or amount' });
     }
 
@@ -446,6 +488,8 @@ code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; fo
 
 // Dashboard entry point — serves index.html with GA4 injection
 let indexHtmlCache = null;
+// Invalidate cache hourly so redeploys take effect without restart
+setInterval(() => { indexHtmlCache = null; }, 3600_000);
 app.get('/shop/:serverId', (req, res) => {
     try {
         if (!indexHtmlCache) {
@@ -464,10 +508,10 @@ app.get('/shop/:serverId', (req, res) => {
 // HELPERS
 // ══════════════════════════════════════════════════════════════════
 
-function getPendingPurchases(serverId) {
+function getPendingPurchases(serverId, playerUuid) {
     const pending = [];
     for (const [id, p] of purchases) {
-        if (p.serverId === serverId && p.status === 'pending') {
+        if (p.serverId === serverId && p.status === 'pending' && (!playerUuid || p.playerUuid === playerUuid)) {
             pending.push({ id, ...p });
         }
     }
@@ -486,10 +530,14 @@ setInterval(() => {
         if (p.status !== 'pending' && now - p.createdAt > 300_000) purchases.delete(id);
         else if (p.status === 'pending' && now - p.createdAt > 600_000) purchases.delete(id);
     }
-    // Mark servers as stale if no sync in 5 minutes
+    // Remove stale servers (no sync in 5 minutes, no active sessions)
     for (const [id, server] of servers) {
         if (now - server.lastSync > 300_000) {
-            console.log(`[Status] Server "${server.serverName}" (${id}) is now stale (no sync >5m)`);
+            const hasActive = [...sessions.values()].some(s => s.serverId === id);
+            if (!hasActive) {
+                console.log(`[Cleanup] Removing stale server "${server.serverName}" (${id})`);
+                servers.delete(id);
+            }
         }
     }
 }, 60_000);

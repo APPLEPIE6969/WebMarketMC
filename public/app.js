@@ -43,7 +43,10 @@ function handleItemIconError(img, material, hideOnFail = false) {
         if (hideOnFail) {
             img.style.display = 'none';
         } else {
-            img.parentElement.innerHTML = ICONS.BOX;
+            // Replace only the img, not the parent (preserves modal layout)
+            const fallback = document.createElement('div');
+            fallback.innerHTML = ICONS.BOX.trim();
+            img.replaceWith(fallback.firstElementChild || fallback);
         }
     }
 }
@@ -57,7 +60,7 @@ function showError(msg) {
             ${ICONS.LOCK}
             <h2 style="color:#f5c542;margin:0 0 12px;">Session Required</h2>
             <p style="color:#aaa;font-size:15px;line-height:1.6;margin:0;">
-                ${msg}<br><br>
+                ${esc(msg)}<br><br>
                 Type <code style="background:rgba(255,255,255,.1);padding:2px 8px;border-radius:4px;color:#f5c542;">/web</code>
                 or <code style="background:rgba(255,255,255,.1);padding:2px 8px;border-radius:4px;color:#f5c542;">/market web</code>
                 in-game to get a dashboard link.
@@ -93,14 +96,31 @@ document.addEventListener('visibilitychange', () => {
     const countdownText = document.getElementById('refresh-countdown');
 
     if (document.hidden) {
-        // Tab hidden — full sleep: kill the auto-refresh interval entirely
+        // Tab hidden — full sleep: kill all intervals
         if (autoRefreshTimer) {
             clearInterval(autoRefreshTimer);
             autoRefreshTimer = null;
         }
+        if (balanceRefreshTimer) {
+            clearInterval(balanceRefreshTimer);
+            balanceRefreshTimer = null;
+        }
         if (countdownText) countdownText.innerHTML = ICONS.MOON;
     } else {
-        // Tab visible again — wake up: reload page data and restart timer
+        // Tab visible again — wake up: restart balance refresh + page data
+        if (!balanceRefreshTimer) {
+            balanceRefreshTimer = setInterval(async () => {
+                if (document.hidden || !TOKEN) return;
+                try {
+                    const player = await api('/player');
+                    if (player) {
+                        const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+                        const balEl = document.getElementById('balance-amount');
+                        if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
+                    }
+                } catch (e) {}
+            }, 30000);
+        }
         if (countdownText) countdownText.textContent = '...';
         switchPage(currentPage);
     }
@@ -175,6 +195,9 @@ function switchPage(page) {
     document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
     document.querySelector(`.nav-tab[data-page="${page}"]`).classList.add('active');
 
+    // Cleanup stocks observer when leaving stocks page
+    if (stocksObserver) { stocksObserver.disconnect(); stocksObserver = null; }
+
     // Show/hide pages
     document.querySelectorAll('.page-content').forEach(p => p.classList.add('hidden'));
     document.getElementById(`page-${page}`).classList.remove('hidden');
@@ -216,6 +239,8 @@ async function refreshCurrentPage() {
     try {
         // Always refresh player data for the balance header
         const player = await api('/player');
+    if (!player) return;
+        if (!player) throw new Error('Session expired');
         if (player) {
             const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
             const balEl = document.getElementById('balance-amount');
@@ -236,13 +261,15 @@ async function refreshCurrentPage() {
             case 'auction': {
                 const auctions = await api('/auctions');
                 renderAuctions(auctions);
-                break;
+      const auctions = await api('/auctions');
+      if (!auctions) break;
             }
             case 'orders': {
                 const orders = await api('/orders');
                 renderOrders(orders);
                 break;
-            }
+      const orders = await api('/orders');
+      if (!orders) break;
         }
     } catch (e) {
         // Silently fail — next interval will retry
@@ -250,10 +277,11 @@ async function refreshCurrentPage() {
 }
 
 // Player Balance Refresh (Every 30 seconds as fallback)
-setInterval(async () => {
+let balanceRefreshTimer = setInterval(async () => {
     if (document.hidden || !TOKEN) return;
     try {
         const player = await api('/player');
+        if (!player) throw new Error('Session expired');
         if (player) {
             const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
             const balEl = document.getElementById('balance-amount');
@@ -269,7 +297,8 @@ setInterval(async () => {
 async function loadMarketPage() {
     try {
         const cats = await api('/categories');
-        renderCategories(cats);
+    const cats = await api('/categories');
+    if (!cats) return;
         if (cats.length > 0) {
             selectCategory(cats[0].id, cats[0].name);
         }
@@ -301,10 +330,11 @@ function renderCategories(cats) {
     cats.forEach(cat => {
         const el = document.createElement('div');
         el.className = 'sidebar-item';
+        el.dataset.catId = cat.id;
         el.innerHTML = `
             <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
                  style="image-rendering:pixelated" onerror="this.style.display='none'">
-            <span>${cat.name}</span>
+            <span>${esc(cat.name)}</span>
             <span class="item-count">${cat.itemCount}</span>
         `;
         el.addEventListener('click', () => selectCategory(cat.id, cat.name));
@@ -319,10 +349,9 @@ async function selectCategory(catId, catName) {
 
 
 
-    // Simpler active highlighting
+    // Active highlighting by category id
     document.querySelectorAll('.sidebar-item').forEach(s => {
-        const name = s.querySelector('span').textContent;
-        s.classList.toggle('active', name === catName);
+        s.classList.toggle('active', s.dataset.catId === catId);
     });
 
     updateBreadcrumb(catName);
@@ -356,13 +385,13 @@ function renderItems(items) {
     empty.style.display = 'none';
 
     grid.innerHTML = items.map(item => `
-        <div class="item-card" onclick="openBuyModal('${esc(item.key)}','${esc(item.name)}',${item.price},'${esc(item.priceFormatted)}','${esc(item.currency)}','${esc(item.material)}')">
+        <div class="item-card" onclick="openBuyModal('${escJs(item.key)}','${escJs(item.name)}',${item.price},'${escJs(item.priceFormatted)}','${escJs(item.currency)}','${escJs(item.material)}')">
             <div class="item-card-header">
                 <div class="item-icon">
                     <img src="${IMG_BASE}${item.material?.toLowerCase() || 'stone'}"
-                         onerror="handleItemIconError(this, '${esc(item.material || 'stone')}')" alt="">
+                         onerror="handleItemIconError(this, '${escJs(item.material || 'stone')}')" alt="">
                 </div>
-                <div class="item-name">${item.name}</div>
+                <div class="item-name">${esc(item.name)}</div>
             </div>
             <div class="item-card-footer">
                 <span class="item-price">${item.priceFormatted}</span>
@@ -386,7 +415,7 @@ function renderPagination(data, loadFn) {
 }
 
 function updateBreadcrumb(name) {
-    document.getElementById('breadcrumb').innerHTML = `<span class="breadcrumb-item active">${name}</span>`;
+    document.getElementById('breadcrumb').innerHTML = `<span class="breadcrumb-item active">${esc(name)}</span>`;
 }
 
 // ── Buy Modal ────────────────────────────────────────────────────
@@ -399,7 +428,7 @@ function openBuyModal(key, name, price, formatted, currency, material) {
     document.getElementById('modal-item-price').textContent = formatted;
     document.getElementById('modal-icon').innerHTML =
         `<img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" width="36" height="36" style="image-rendering:pixelated"
-              onerror="handleItemIconError(this, '${esc(material || 'stone')}')">`;
+              onerror="handleItemIconError(this, '${escJs(material || 'stone')}')">`;
     document.getElementById('amount-input').value = 1;
     updateModalTotal();
     document.getElementById('buy-modal').style.display = '';
@@ -480,6 +509,8 @@ async function pollPurchase(purchaseId) {
             }
         } catch (_) { /* retry */ }
     }
+    // Timed out after 30s — purchase may still complete server-side
+    showToast('warn', 'Purchase taking longer than expected. Check in-game.');
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -529,10 +560,10 @@ function renderAuctions(auctions) {
             <div class="auction-card-header">
                 <div class="auction-item-icon">
                     <img src="${IMG_BASE}${a.material?.toLowerCase() || 'stone'}"
-                         onerror="handleItemIconError(this, '${esc(a.material || 'stone')}')" alt="">
+                         onerror="handleItemIconError(this, '${escJs(a.material || 'stone')}')" alt="">
                 </div>
                 <div class="auction-item-info">
-                    <div class="auction-item-name">${a.itemName}</div>
+                    <div class="auction-item-name">${esc(a.itemName)}</div>
                     <div class="auction-item-amount">${a.amount > 1 ? `x${a.amount}` : ''} by ${a.seller}</div>
                 </div>
             </div>
@@ -553,7 +584,7 @@ function renderAuctions(auctions) {
             <button class="btn-buy" 
                 style="margin: 10px 15px 15px; width: calc(100% - 30px); font-size: 13px; padding: 10px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
                 ${isOwner ? 'disabled' : ''}
-                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${esc(a.itemName)}', '${esc(a.material || 'stone')}', ${a.price}, '${esc(a.currencySymbol)}')">
+                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${escJs(a.itemName)}', '${escJs(a.material || 'stone')}', ${a.price}, '${escJs(a.currencySymbol)}')">
                 ${isOwner ? 'Your Auction' : (a.isBin ? 'Buy It Now' : 'Place Bid')}
             </button>
         </div>`;
@@ -582,7 +613,7 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
     document.getElementById('auction-modal-item-price').textContent = isBin ? `Price: ${currencyStr}${price.toLocaleString()}` : `Current: ${currencyStr}${price.toLocaleString()}`;
 
     const iconEl = document.getElementById('auction-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${material}" onerror="handleItemIconError(this, '${material}', true)">`;
+    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('auction-amount-input');
     if (isBin) {
@@ -685,8 +716,8 @@ function renderOrders(orders) {
             <td>
                 <div class="order-item-cell">
                     <img class="order-item-icon" src="${IMG_BASE}${o.material?.toLowerCase() || 'stone'}"
-                         loading="lazy" onerror="handleItemIconError(this, '${esc(o.material || 'stone')}', true)" alt="">
-                    <span class="order-item-name">${o.itemName}</span>
+                         loading="lazy" onerror="handleItemIconError(this, '${escJs(o.material || 'stone')}', true)" alt="">
+                    <span class="order-item-name">${esc(o.itemName)}</span>
                 </div>
             </td>
             <td>${o.buyer}</td>
@@ -703,7 +734,7 @@ function renderOrders(orders) {
                 <button class="btn-buy" 
                     style="padding: 6px 12px; font-size: 12px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
                     ${isOwner ? 'disabled' : ''}
-                    onclick="openOrderFillModal(${o.id}, '${esc(o.itemName)}', '${esc(o.material || 'stone')}', ${o.pricePerPiece}, '${esc(o.currencySymbol)}', ${remaining})">
+                    onclick="openOrderFillModal(${o.id}, '${escJs(o.itemName)}', '${escJs(o.material || 'stone')}', ${o.pricePerPiece}, '${escJs(o.currencySymbol)}', ${remaining})">
                     ${isOwner ? 'Your Order' : 'Fill Order'}
                 </button>
             </td>
@@ -720,7 +751,7 @@ function openOrderFillModal(id, name, material, price, currencyStr, maxAmount) {
     document.getElementById('order-fill-modal-item-price').textContent = `Payout: ${currencyStr}${price.toLocaleString()} each`;
 
     const iconEl = document.getElementById('order-fill-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${material}" onerror="handleItemIconError(this, '${material}', true)">`;
+    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('order-fill-amount-input');
     input.value = 1;
@@ -815,6 +846,7 @@ async function loadStocksPage() {
             api('/stocks'),
             api('/price-history')
         ]);
+    if (!stocks) return;
         stocksData = stocks;
         priceHistory = history || {};
         renderStocks(stocksData);
@@ -879,12 +911,12 @@ function renderStocksBody(stocks, isAppend = false) {
         const arrow = s.change > 0.5 ? ICONS.ARROW_UP : s.change < -0.5 ? ICONS.ARROW_DOWN : ICONS.ARROW_FLAT;
 
         return `
-        <tr onclick="openStockChart('${esc(s.key)}','${esc(s.name)}','${esc(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${esc(s.currencySymbol)}')">
+        <tr onclick="openStockChart('${escJs(s.key)}','${escJs(s.name)}','${escJs(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${escJs(s.currencySymbol)}')">
             <td>
                 <div class="stock-item-cell">
                     <img class="stock-item-icon" src="${IMG_BASE}${s.material?.toLowerCase() || 'stone'}"
-                         loading="lazy" onerror="handleItemIconError(this, '${esc(s.material || 'stone')}', true)" alt="">
-                    <span>${s.name}</span>
+                         loading="lazy" onerror="handleItemIconError(this, '${escJs(s.material || 'stone')}', true)" alt="">
+                    <span>${esc(s.name)}</span>
                 </div>
             </td>
             <td style="color:var(--accent);font-weight:600">${s.buyPrice > 0 ? s.currencySymbol + s.buyPrice.toLocaleString(undefined, { maximumFractionDigits: 2 }) : '—'}</td>
@@ -932,7 +964,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
         <div class="chart-modal">
             <div class="chart-modal-header">
                 <h3>
-                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${esc(material || 'stone')}', true)" alt="">
+                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
                     ${name}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
@@ -1170,6 +1202,10 @@ function drawChart(data, isPositive) {
 
 async function api(endpoint) {
     const resp = await fetch(`${API_BASE}${endpoint}`, { headers: AUTH_HEADERS() });
+    if (resp.status === 401) {
+        showError('Session expired. Use /web in-game to get a new link.');
+        return null;
+    }
     if (!resp.ok) throw new Error(`API ${resp.status}`);
     return resp.json();
 }
@@ -1183,15 +1219,25 @@ function showToast(type, msg) {
     setTimeout(() => toast.remove(), 4000);
 }
 
-function showError(msg) {
-    const overlay = document.getElementById('loading-overlay');
-    overlay.querySelector('p').textContent = msg;
+function esc(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;')
+        .replace(/`/g, '&#96;');
 }
 
-function esc(str) {
-    const div = document.createElement('div');
-    div.textContent = String(str);
-    return div.innerHTML;
+/** Escape for use inside JS string literals (onclick handlers) */
+function escJs(str) {
+    return String(str)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/"/g, '\\"')
+        .replace(/`/g, '\\`')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r');
 }
 
 function debounce(fn, ms) {
