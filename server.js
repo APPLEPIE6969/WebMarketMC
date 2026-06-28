@@ -266,7 +266,15 @@ app.use('/api/', rateLimit({
     legacyHeaders: false,
     message: { error: 'Too many requests, please slow down.' },
     // Skip rate limiting for MC servers that provide a valid API Key
-    skip: (req) => { const sid = req.headers['x-server-id']; const s = servers.get(sid); return s && s.apiKey === req.headers['x-api-key']; }
+    // Server-to-server sync endpoints have their own auth, but purchases/bids still get rate-limited
+    skip: (req) => {
+        const sid = req.headers['x-server-id']; const s = servers.get(sid);
+        const isServerAuthed = s && s.apiKey === req.headers['x-api-key'];
+        if (!isServerAuthed) return false;
+        // Only skip rate limit for read/sync endpoints, NOT for purchase/bid/fill-order
+        const purchasePaths = ['/buy', '/bid', '/fill-order'];
+        return !purchasePaths.some(p => req.path.endsWith(p));
+    }
 }));
 
 // ── In-Memory Data Stores ────────────────────────────────────────
@@ -279,6 +287,10 @@ const sessions = new Map();
 
 /** @type {Map<string, PurchaseData>} purchaseId → purchase data */
 const purchases = new Map();
+
+/** @type {Map<string, number>} "serverId:auctionId:playerUuid" → timestamp of last bid/purchase */
+const recentActions = new Map();
+const ACTION_COOLDOWN_MS = 3000; // 3s cooldown between actions on same auction
 
 // ── Types (for documentation) ────────────────────────────────────
 // ServerData:  { apiKey, serverName, lastSync, categories[], items{},
@@ -591,6 +603,14 @@ app.post('/api/:serverId/buy', requireSession, (req, res) => {
         return res.status(400).json({ error: 'Invalid item or amount' });
     }
 
+    // Duplicate purchase guard: 3s cooldown per player+item
+    const actionKey = `buy:${req.serverId}:${item}:${req.session.playerUuid}`;
+    const lastAction = recentActions.get(actionKey);
+    if (lastAction && (Date.now() - lastAction) < ACTION_COOLDOWN_MS) {
+        return res.status(429).json({ error: 'Too fast — please wait before buying this item again' });
+    }
+    recentActions.set(actionKey, Date.now());
+
     const purchaseId = crypto.randomUUID();
 
     purchases.set(purchaseId, {
@@ -606,12 +626,44 @@ app.post('/api/:serverId/buy', requireSession, (req, res) => {
     res.json({ success: true, purchaseId, message: 'Purchase queued — delivering in-game...' });
 });
 
-/** POST /api/:serverId/bid — Browser submits an auction bid */
+/** POST /api/:serverId/bid — Browser submits an auction bid or BIN purchase */
 app.post('/api/:serverId/bid', requireSession, (req, res) => {
-    const { auctionId, amount } = req.body;
+    const { auctionId, amount, quantity, type } = req.body;
 
     if (!auctionId || amount == null || amount <= 0) {
         return res.status(400).json({ error: 'Invalid auction or amount' });
+    }
+
+    // Validate type field
+    const actionType = type === 'bin' ? 'bin' : 'bid';
+
+    // For BIN purchases, quantity must be a positive integer
+    if (actionType === 'bin' && quantity != null) {
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 64) {
+            return res.status(400).json({ error: 'Invalid quantity' });
+        }
+    }
+
+    // Duplicate purchase guard: 3s cooldown per player+auctionId
+    const actionKey = `${req.serverId}:${auctionId}:${req.session.playerUuid}`;
+    const lastAction = recentActions.get(actionKey);
+    if (lastAction && (Date.now() - lastAction) < ACTION_COOLDOWN_MS) {
+        return res.status(429).json({ error: 'Too fast — please wait before acting on this auction again' });
+    }
+    recentActions.set(actionKey, Date.now());
+
+    // Server-side quantity validation for BIN purchases against cached auction data
+    if (actionType === 'bin' && quantity != null && quantity > 1) {
+        try {
+            const auctions = JSON.parse(req.server.auctionsJson || '[]');
+            const auction = auctions.find(a => a.id === parseInt(auctionId));
+            if (auction) {
+                const maxQty = auction.remaining != null ? auction.remaining : (auction.amount || 1);
+                if (quantity > maxQty) {
+                    return res.status(400).json({ error: `Only ${maxQty} available` });
+                }
+            }
+        } catch (e) { /* If auction data unavailable, let plugin validate */ }
     }
 
     const purchaseId = crypto.randomUUID();
@@ -619,14 +671,15 @@ app.post('/api/:serverId/bid', requireSession, (req, res) => {
     purchases.set(purchaseId, {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
-        type: 'bid',
+        type: actionType,
         auctionId: parseInt(auctionId),
         amount: isNaN(parseFloat(amount)) ? 0 : parseFloat(amount),
+        quantity: actionType === 'bin' ? (parseInt(quantity) || 1) : undefined,
         status: 'pending',
         createdAt: Date.now(),
     });
 
-    res.json({ success: true, purchaseId, message: 'Bid queued — confirming in-game...' });
+    res.json({ success: true, purchaseId, message: actionType === 'bin' ? 'Purchase queued — confirming in-game...' : 'Bid queued — confirming in-game...' });
 });
 
 /** POST /api/:serverId/fill-order — Browser submits items to fulfill a buy order */
@@ -636,6 +689,14 @@ app.post('/api/:serverId/fill-order', requireSession, (req, res) => {
     if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
         return res.status(400).json({ error: 'Invalid order or amount' });
     }
+
+    // Duplicate fill guard: 3s cooldown per player+orderId
+    const actionKey = `fill:${req.serverId}:${orderId}:${req.session.playerUuid}`;
+    const lastAction = recentActions.get(actionKey);
+    if (lastAction && (Date.now() - lastAction) < ACTION_COOLDOWN_MS) {
+        return res.status(429).json({ error: 'Too fast — please wait before filling this order again' });
+    }
+    recentActions.set(actionKey, Date.now());
 
     const purchaseId = crypto.randomUUID();
 
@@ -669,6 +730,14 @@ app.get('/api/:serverId/purchase-status', requireSession, (req, res) => {
         result: purchase.result || null,
     });
 });
+
+// Clean up stale recentActions entries every 60s
+setInterval(() => {
+    const cutoff = Date.now() - 60_000;
+    for (const [key, ts] of recentActions) {
+        if (ts < cutoff) recentActions.delete(key);
+    }
+}, 60_000);
 
 // ══════════════════════════════════════════════════════════════════
 // STATIC FILES + DASHBOARD PAGE

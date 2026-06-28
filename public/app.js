@@ -260,16 +260,16 @@ async function refreshCurrentPage() {
             }
             case 'auction': {
                 const auctions = await api('/auctions');
+                if (!auctions) break;
                 renderAuctions(auctions);
-      const auctions = await api('/auctions');
-      if (!auctions) break;
+                break;
             }
             case 'orders': {
                 const orders = await api('/orders');
+                if (!orders) break;
                 renderOrders(orders);
                 break;
-      const orders = await api('/orders');
-      if (!orders) break;
+            }
         }
     } catch (e) {
         // Silently fail — next interval will retry
@@ -297,8 +297,7 @@ let balanceRefreshTimer = setInterval(async () => {
 async function loadMarketPage() {
     try {
         const cats = await api('/categories');
-    const cats = await api('/categories');
-    if (!cats) return;
+        if (!cats) return;
         if (cats.length > 0) {
             selectCategory(cats[0].id, cats[0].name);
         }
@@ -569,9 +568,18 @@ function renderAuctions(auctions) {
             </div>
             <div class="auction-details">
                 <div class="auction-detail-row">
-                    <span class="auction-detail-label">${a.isBin ? 'Price' : 'Current Bid'}</span>
+                    <span class="auction-detail-label">${a.isBin ? 'Price each' : 'Current Bid'}</span>
                     <span class="auction-price-value">${a.currencySymbol}${a.price.toLocaleString()}</span>
                 </div>
+                ${a.isBin && a.amount > 1 ? `
+                <div class="auction-detail-row">
+                    <span class="auction-detail-label">Total</span>
+                    <span class="auction-detail-value">${a.currencySymbol}${(a.price * a.amount).toLocaleString()}</span>
+                </div>
+                <div class="auction-detail-row">
+                    <span class="auction-detail-label">Available</span>
+                    <span class="auction-detail-value">${a.remaining != null ? a.remaining : a.amount} / ${a.amount}</span>
+                </div>` : ''}
                 ${a.highestBidder ? `
                 <div class="auction-detail-row">
                     <span class="auction-detail-label">Top Bidder</span>
@@ -584,7 +592,7 @@ function renderAuctions(auctions) {
             <button class="btn-buy" 
                 style="margin: 10px 15px 15px; width: calc(100% - 30px); font-size: 13px; padding: 10px; cursor: ${isOwner ? 'not-allowed' : 'pointer'}; opacity: ${isOwner ? 0.6 : 1};" 
                 ${isOwner ? 'disabled' : ''}
-                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${escJs(a.itemName)}', '${escJs(a.material || 'stone')}', ${a.price}, '${escJs(a.currencySymbol)}')">
+                onclick="openAuctionModal(${a.id}, ${a.isBin}, '${escJs(a.itemName)}', '${escJs(a.material || 'stone')}', ${a.price}, '${escJs(a.currencySymbol)}', ${a.amount || 1}, ${a.remaining != null ? a.remaining : (a.amount || 1)})">
                 ${isOwner ? 'Your Auction' : (a.isBin ? 'Buy It Now' : 'Place Bid')}
             </button>
         </div>`;
@@ -605,36 +613,117 @@ function formatDuration(ms) {
 
 let currentAuctionContext = null;
 
-function openAuctionModal(id, isBin, name, material, price, currencyStr) {
-    currentAuctionContext = { id, isBin, price, currency: currencyStr };
+function openAuctionModal(id, isBin, name, material, price, currencyStr, amount, remaining) {
+    currentAuctionContext = { id, isBin, price, currency: currencyStr, amount: amount || 1, remaining: remaining != null ? remaining : (amount || 1) };
 
     document.getElementById('auction-modal-title').textContent = isBin ? 'Buy It Now' : 'Place Bid';
     document.getElementById('auction-modal-item-name').textContent = name;
-    document.getElementById('auction-modal-item-price').textContent = isBin ? `Price: ${currencyStr}${price.toLocaleString()}` : `Current: ${currencyStr}${price.toLocaleString()}`;
+    document.getElementById('auction-modal-item-price').textContent = isBin
+        ? (amount > 1 ? `Price each: ${currencyStr}${price.toLocaleString()}` : `Price: ${currencyStr}${price.toLocaleString()}`)
+        : `Current: ${currencyStr}${price.toLocaleString()}`;
+
+    // Show available/total info for multi-item BIN auctions
+    const infoEl = document.getElementById('auction-modal-qty-info');
+    if (isBin && amount > 1) {
+        const remaining = currentAuctionContext.remaining != null ? currentAuctionContext.remaining : amount;
+        infoEl.style.display = '';
+        infoEl.innerHTML = `<span style="color:var(--text-secondary)">Available: <strong style="color:var(--text-primary)">${remaining} / ${amount}</strong></span>
+            <span style="color:var(--text-secondary);margin-left:12px">Total: <strong style="color:var(--accent)">${currencyStr}${(price * remaining).toLocaleString()}</strong></span>`;
+    } else {
+        infoEl.style.display = 'none';
+    }
 
     const iconEl = document.getElementById('auction-modal-icon');
     iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('auction-amount-input');
-    if (isBin) {
+    const selector = document.getElementById('auction-amount-selector');
+    const minusBtn = document.getElementById('auction-amount-minus');
+    const plusBtn = document.getElementById('auction-amount-plus');
+
+    if (isBin && amount > 1) {
+        // BIN auction with multiple items — show quantity selector
+        selector.style.display = '';
+        minusBtn.style.display = '';
+        plusBtn.style.display = '';
+        input.value = 1;
+        input.min = 1;
+        input.max = remaining != null ? remaining : amount;
+        input.step = 1;
+        input.disabled = false;
+        document.getElementById('auction-modal-btn-text').textContent = 'Confirm Purchase';
+    } else if (isBin) {
+        // BIN auction with single item — hide quantity selector
+        selector.style.display = 'none';
         input.value = price;
         input.disabled = true;
         document.getElementById('auction-modal-btn-text').textContent = 'Confirm Purchase';
     } else {
+        // Bid auction — show price input with +/- buttons
+        selector.style.display = '';
+        minusBtn.style.display = '';
+        plusBtn.style.display = '';
         input.value = price + 1; // Default next bid
         input.min = price + 0.1;
+        input.step = 0.1;
+        input.max = '';
         input.disabled = false;
         document.getElementById('auction-modal-btn-text').textContent = 'Confirm Bid';
     }
 
     document.getElementById('auction-modal').style.display = 'flex';
+    updateAuctionModalTotal();
 }
+
+function updateAuctionModalTotal() {
+    const row = document.getElementById('auction-modal-total-row');
+    const totalEl = document.getElementById('auction-modal-total');
+    if (!currentAuctionContext || !currentAuctionContext.isBin || currentAuctionContext.amount <= 1) {
+        row.style.display = 'none';
+        return;
+    }
+    const qty = parseInt(document.getElementById('auction-amount-input').value) || 1;
+    const total = currentAuctionContext.price * qty;
+    row.style.display = '';
+    totalEl.textContent = `${currentAuctionContext.currency}${total.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+}
+
+document.getElementById('auction-amount-input')?.addEventListener('input', updateAuctionModalTotal);
 
 document.getElementById('auction-modal-close')?.addEventListener('click', () => {
     document.getElementById('auction-modal').style.display = 'none';
 });
 document.getElementById('auction-modal-cancel')?.addEventListener('click', () => {
     document.getElementById('auction-modal').style.display = 'none';
+});
+
+document.getElementById('auction-amount-minus')?.addEventListener('click', () => {
+    const inp = document.getElementById('auction-amount-input');
+    if (!currentAuctionContext) return;
+    if (currentAuctionContext.isBin && currentAuctionContext.amount > 1) {
+        // Quantity mode — step by 1
+        inp.value = Math.max(1, (parseInt(inp.value) || 1) - 1);
+    } else {
+        // Bid mode — step by 0.1
+        const step = parseFloat(inp.step) || 0.1;
+        inp.value = Math.max(parseFloat(inp.min) || 0.1, (parseFloat(inp.value) || 0) - step);
+        inp.value = Math.round(inp.value * 100) / 100;
+    }
+    updateAuctionModalTotal();
+});
+document.getElementById('auction-amount-plus')?.addEventListener('click', () => {
+    const inp = document.getElementById('auction-amount-input');
+    if (!currentAuctionContext) return;
+    if (currentAuctionContext.isBin && currentAuctionContext.amount > 1) {
+        // Quantity mode — step by 1, max = remaining
+        inp.value = Math.min(currentAuctionContext.remaining, Math.max(1, (parseInt(inp.value) || 1) + 1));
+    } else {
+        // Bid mode — step by 0.1
+        const step = parseFloat(inp.step) || 0.1;
+        inp.value = (parseFloat(inp.value) || 0) + step;
+        inp.value = Math.round(inp.value * 100) / 100;
+    }
+    updateAuctionModalTotal();
 });
 
 document.getElementById('auction-modal-submit')?.addEventListener('click', async () => {
@@ -655,10 +744,17 @@ document.getElementById('auction-modal-submit')?.addEventListener('click', async
             return;
         }
 
+        // Build request body with type and quantity for BIN purchases
+        const body = { auctionId: currentAuctionContext.id, amount, type: currentAuctionContext.isBin ? 'bin' : 'bid' };
+        if (currentAuctionContext.isBin && currentAuctionContext.amount > 1) {
+            body.quantity = parseInt(input.value) || 1;
+            body.amount = currentAuctionContext.price; // per-item price for BIN
+        }
+
         const resp = await fetch(`${API_BASE}/bid`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', ...AUTH_HEADERS() },
-            body: JSON.stringify({ auctionId: currentAuctionContext.id, amount })
+            body: JSON.stringify(body)
         });
         const result = await resp.json();
 

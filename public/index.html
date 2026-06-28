@@ -281,9 +281,25 @@
                 <div class="amount-selector" id="auction-amount-selector">
                     <label>Your Bid</label>
                     <div class="amount-controls" style="flex:1;">
-                        <input type="number" id="auction-amount-input" step="0.1"
-                            style="width:100%; text-align:left; padding-left:12px;" placeholder="Enter amount...">
+                        <button class="amount-btn" id="auction-amount-minus">
+                            <svg class="icon icon-sm" viewBox="0 0 24 24">
+                                <line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                        </button>
+                        <input type="number" id="auction-amount-input" step="0.1" min="0.1"
+                            style="flex:1; text-align:center;" placeholder="Enter amount...">
+                        <button class="amount-btn" id="auction-amount-plus">
+                            <svg class="icon icon-sm" viewBox="0 0 24 24">
+                                <line x1="12" y1="5" x2="12" y2="19" />
+                                <line x1="5" y1="12" x2="19" y2="12" />
+                            </svg>
+                        </button>
                     </div>
+                </div>
+                <div class="modal-qty-info" id="auction-modal-qty-info" style="display:none; padding: 0 0 8px; font-size: 13px;"></div>
+                <div class="modal-total-row" id="auction-modal-total-row" style="display:none; padding: 8px 0; font-size: 14px; border-top: 1px solid var(--border); margin-top: 4px;">
+                    <span style="color:var(--text-secondary)">Total:</span>
+                    <strong id="auction-modal-total" style="color:var(--accent); margin-left: 8px;"></strong>
                 </div>
             </div>
             <div class="modal-footer">
