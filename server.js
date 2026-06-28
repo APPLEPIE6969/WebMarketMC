@@ -16,9 +16,242 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
+// ── Astra DB Configuration ──────────────────────────────────────
+const ASTRA_TOKEN = process.env.ASTRA_TOKEN || '';
+const ASTRA_DB_ID = process.env.ASTRA_DB_ID || '165b585e-7ece-4015-987f-165032706b56';
+const ASTRA_REGION = process.env.ASTRA_REGION || 'us-east-2';
+const ASTRA_KEYSPACE = process.env.ASTRA_KEYSPACE || 'webmarketmc';
+const ASTRA_BASE = `https://${ASTRA_DB_ID}-${ASTRA_REGION}.apps.astra.datastax.com`;
+const ASTRA_REST = `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`;
+
 const MAX_RAM_MB = 500;
 const MAX_QUEUE_SIZE = 50;
 const registrationQueue = [];
+
+// ── In-Memory Write-Through Cache ──────────────────────────────
+// These cache Astra DB data for fast reads; writes go to DB first
+/** @type {Map<string, object>} serverId → server data */
+const serverCache = new Map();
+/** @type {Map<string, object>} token → session data */
+const sessionCache = new Map();
+/** @type {Map<string, object>} purchaseId → purchase data */
+const purchaseCache = new Map();
+
+// Track if initial cache load is done
+let cacheReady = false;
+let cacheReadyPromise = null;
+
+// ── Astra DB Helper ─────────────────────────────────────────────
+async function astraFetch(table, method, pathSuffix, body) {
+    const url = `${ASTRA_REST}/${table}${pathSuffix ? '/' + pathSuffix : ''}`;
+    const headers = {
+        'Authorization': `Bearer ${ASTRA_TOKEN}`,
+        'X-Cassandra-Token': ASTRA_TOKEN,
+        'Content-Type': 'application/json',
+    };
+    const opts = { method, headers };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+
+    const resp = await fetch(url, opts);
+    if (resp.status === 204 || resp.status === 201) return { ok: true, status: resp.status, data: null };
+    const text = await resp.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    if (!resp.ok) {
+        const errMsg = data?.description || data?.message || text.slice(0, 200);
+        console.error(`[Astra] ${method} ${url} → ${resp.status}: ${errMsg}`);
+        return { ok: false, status: resp.status, data, error: errMsg };
+    }
+    return { ok: true, status: resp.status, data };
+}
+
+// Get a single row by primary key
+async function astraGet(table, pk) {
+    return astraFetch(table, 'GET', pk);
+}
+
+// Insert a row
+async function astraInsert(table, row) {
+    return astraFetch(table, 'POST', '', row);
+}
+
+// Update a row (partial by PK)
+async function astraUpdate(table, pk, fields) {
+    return astraFetch(table, 'PUT', pk, fields);
+}
+
+// Delete a row by PK
+async function astraDelete(table, pk) {
+    return astraFetch(table, 'DELETE', pk);
+}
+
+// Query rows with a filter (value is escaped for CQL safety)
+async function astraQuery(table, column, value) {
+    const safeValue = String(value).replace(/"/g, '\\"');
+    const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
+    const resp = await fetch(url, {
+        headers: {
+            'Authorization': `Bearer ${ASTRA_TOKEN}`,
+            'X-Cassandra-Token': ASTRA_TOKEN,
+        },
+    });
+    const text = await resp.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    if (!resp.ok) {
+        console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → ${resp.status}`);
+        return { ok: false, data: null };
+    }
+    return { ok: true, data: data?.data || [] };
+}
+
+// ── Cache Load on Startup ──────────────────────────────────────
+async function loadCacheFromDB() {
+    if (!ASTRA_TOKEN) {
+        console.log('[Cache] No ASTRA_TOKEN — running in memory-only mode');
+        cacheReady = true;
+        return;
+    }
+
+    console.log('[Cache] Loading data from Astra DB...');
+
+    // Load servers
+    const serversResp = await astraFetch('servers', 'GET', '?pageSize=100');
+    if (serversResp.ok && serversResp.data?.data) {
+        for (const row of serversResp.data.data) {
+            serverCache.set(row.server_id, deserializeServer(row));
+        }
+        console.log(`[Cache] Loaded ${serverCache.size} servers`);
+    }
+
+    // Load sessions (only non-expired)
+    const sessionsResp = await astraFetch('sessions', 'GET', '?pageSize=500');
+    if (sessionsResp.ok && sessionsResp.data?.data) {
+        const now = Date.now();
+        let loaded = 0;
+        for (const row of sessionsResp.data.data) {
+            if (row.expires > now) {
+                sessionCache.set(row.session_token, deserializeSession(row));
+                loaded++;
+            }
+        }
+        console.log(`[Cache] Loaded ${loaded} active sessions`);
+    }
+
+    // Load purchases (only pending, not stale)
+    const purchasesResp = await astraFetch('purchases', 'GET', '?pageSize=500');
+    if (purchasesResp.ok && purchasesResp.data?.data) {
+        const now = Date.now();
+        let loaded = 0;
+        for (const row of purchasesResp.data.data) {
+            const age = now - row.created_at;
+            if (row.status === 'pending' && age < 600_000) {
+                purchaseCache.set(row.purchase_id, deserializePurchase(row));
+                loaded++;
+            } else if (row.status !== 'pending' && age < 300_000) {
+                purchaseCache.set(row.purchase_id, deserializePurchase(row));
+                loaded++;
+            }
+        }
+        console.log(`[Cache] Loaded ${loaded} recent purchases`);
+    }
+
+    cacheReady = true;
+    console.log('[Cache] Ready');
+}
+
+// ── Serialization Helpers ──────────────────────────────────────
+function serializeServer(s) {
+    return {
+        server_id: s.serverId,
+        api_key: s.apiKey,
+        server_name: s.serverName || 'Minecraft Server',
+        last_sync: s.lastSync || Date.now(),
+        categories_json: JSON.stringify(s.categories || []),
+        items_json: JSON.stringify(s.items || {}),
+        auctions_json: s.auctionsJson || '[]',
+        orders_json: s.ordersJson || '[]',
+        stocks_json: s.stocksJson || '[]',
+        price_history_json: s.priceHistoryJson || '{}',
+    };
+}
+
+function deserializeServer(row) {
+    let categories = [], items = {};
+    try { categories = JSON.parse(row.categories_json || '[]'); } catch {}
+    try { items = JSON.parse(row.items_json || '{}'); } catch {}
+    return {
+        serverId: row.server_id,
+        apiKey: row.api_key,
+        serverName: row.server_name,
+        lastSync: row.last_sync,
+        categories,
+        items,
+        auctionsJson: row.auctions_json || '[]',
+        ordersJson: row.orders_json || '[]',
+        stocksJson: row.stocks_json || '[]',
+        priceHistoryJson: row.price_history_json || '{}',
+    };
+}
+
+function serializeSession(token, s) {
+    return {
+        session_token: token,
+        server_id: s.serverId,
+        player_uuid: s.playerUuid,
+        player_name: s.playerName || 'Player',
+        balances_json: JSON.stringify(s.balances || {}),
+        default_currency: s.defaultCurrency || 'Aurels',
+        expires: s.expires,
+    };
+}
+
+function deserializeSession(row) {
+    let balances = {};
+    try { balances = JSON.parse(row.balances_json || '{}'); } catch {}
+    return {
+        serverId: row.server_id,
+        playerUuid: row.player_uuid,
+        playerName: row.player_name || 'Player',
+        balances,
+        defaultCurrency: row.default_currency || 'Aurels',
+        expires: row.expires,
+    };
+}
+
+function serializePurchase(id, p) {
+    return {
+        purchase_id: id,
+        server_id: p.serverId,
+        player_uuid: p.playerUuid,
+        type: p.type,
+        item_key: p.item || p.itemKey || '',
+        auction_id: p.auctionId || 0,
+        order_id: p.orderId || 0,
+        amount: String(p.amount || 0),
+        status: p.status,
+        created_at: p.createdAt,
+        result_json: p.result ? JSON.stringify(p.result) : '',
+    };
+}
+
+function deserializePurchase(row) {
+    let result = null;
+    try { result = JSON.parse(row.result_json || 'null'); } catch {}
+    return {
+        serverId: row.server_id,
+        playerUuid: row.player_uuid,
+        type: row.type,
+        item: row.item_key,
+        itemKey: row.item_key,
+        auctionId: row.auction_id,
+        orderId: row.order_id,
+        amount: row.type === 'bid' || row.type === 'fill_order' ? parseFloat(row.amount) : parseInt(row.amount),
+        status: row.status,
+        createdAt: row.created_at,
+        result,
+    };
+}
 
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false })); // CSP disabled for inline styles
