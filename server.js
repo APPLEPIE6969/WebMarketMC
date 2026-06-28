@@ -23,7 +23,7 @@ const registrationQueue = [];
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false })); // CSP disabled for inline styles
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '7mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
