@@ -32,7 +32,6 @@ const ENCRYPTION_PREFIX = 'enc:';
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 12;
 const AUTH_TAG_LENGTH = 16;
-const KEY_LENGTH = 32;
 
 let encryptionEnabled = false;
 
@@ -159,7 +158,7 @@ async function astraDelete(table, pk) {
 }
 
 async function astraQuery(table, column, value) {
-    const safeValue = String(value).replace(/"/g, '\\"');
+    const safeValue = String(value).replace(/[\\"]/g, '\\$&');
     const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
     const resp = await fetch(url, {
         headers: {
@@ -198,15 +197,20 @@ async function loadCacheFromDB() {
     if (sessionsResp.ok && sessionsResp.data?.data) {
         const now = Date.now();
         let loaded = 0;
+        let skipped = 0;
         for (const row of sessionsResp.data.data) {
-            if (row.expires > now) {
-                const session = deserializeSession(row);
-                const tokenKey = decrypt(row.session_token);
-                sessionCache.set(tokenKey, session);
-                loaded++;
+            if (row.expires <= now) continue;
+            const tokenKey = decrypt(row.session_token);
+            if (!tokenKey || typeof tokenKey !== 'string' || tokenKey.startsWith(ENCRYPTION_PREFIX)) {
+                console.warn(`[Cache] Skipping session with undecryptable token (uuid=${row.player_uuid || '?'})`);
+                skipped++;
+                continue;
             }
+            const session = deserializeSession(row);
+            sessionCache.set(tokenKey, session);
+            loaded++;
         }
-        console.log(`[Cache] Loaded ${loaded} active sessions`);
+        console.log(`[Cache] Loaded ${loaded} active sessions${skipped ? `, skipped ${skipped} undecryptable` : ''}`);
     }
 
     const purchasesResp = await astraFetch('purchases', 'GET', '?pageSize=500');
