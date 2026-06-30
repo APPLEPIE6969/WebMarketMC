@@ -165,7 +165,7 @@ function decryptJson(ciphertext) {
 // Cache stores DECRYPTED values — encryption only applies to DB storage
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
-/** @type {Map<string, object>} token → session data (plaintext token as key) */
+/** @type {Map<string, object>} tokenHash(token) → session data */
 const sessionCache = new Map();
 /** @type {Map<string, object>} purchaseId → purchase data */
 const purchaseCache = new Map();
@@ -175,7 +175,15 @@ let cacheReady = false;
 
 // ── Astra DB Helper ─────────────────────────────────────────────
 async function astraFetch(table, method, pathSuffix, body) {
-    const encodedSuffix = pathSuffix ? '/' + encodeURIComponent(pathSuffix) : '';
+    // Query strings (?pageSize=...) go as-is; PK path segments get encoded
+    let encodedSuffix = '';
+    if (pathSuffix) {
+        if (pathSuffix.startsWith('?')) {
+            encodedSuffix = pathSuffix;
+        } else {
+            encodedSuffix = '/' + encodeURIComponent(pathSuffix);
+        }
+    }
     const url = `${ASTRA_REST}/${table}${encodedSuffix}`;
     const headers = {
         'Authorization': `Bearer ${ASTRA_TOKEN}`,
@@ -185,7 +193,14 @@ async function astraFetch(table, method, pathSuffix, body) {
     const opts = { method, headers, signal: AbortSignal.timeout(ASTRA_TIMEOUT_MS) };
     if (body !== undefined) opts.body = JSON.stringify(body);
 
-    const resp = await fetch(url, opts);
+    let resp;
+    try {
+        resp = await fetch(url, opts);
+    } catch (e) {
+        const errMsg = e.message || 'Network/timeout error';
+        console.error(`[Astra] ${method} ${url} → transport error: ${errMsg}`);
+        return { ok: false, status: 0, data: null, error: errMsg };
+    }
     if (resp.status === 204 || resp.status === 201) return { ok: true, status: resp.status, data: null };
     const text = await resp.text();
     let data = null;
@@ -222,13 +237,20 @@ async function astraDelete(table, pk) {
 async function astraQuery(table, column, value) {
     const safeValue = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
-    const resp = await fetch(url, {
-        headers: {
-            'Authorization': `Bearer ${ASTRA_TOKEN}`,
-            'X-Cassandra-Token': ASTRA_TOKEN,
-        },
-        signal: AbortSignal.timeout(ASTRA_TIMEOUT_MS),
-    });
+    let resp;
+    try {
+        resp = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${ASTRA_TOKEN}`,
+                'X-Cassandra-Token': ASTRA_TOKEN,
+            },
+            signal: AbortSignal.timeout(ASTRA_TIMEOUT_MS),
+        });
+    } catch (e) {
+        const errMsg = e.message || 'Network/timeout error';
+        console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → transport error: ${errMsg}`);
+        return { ok: false, data: null, error: errMsg };
+    }
     const text = await resp.text();
     let data = null;
     try { data = JSON.parse(text); } catch {}
@@ -249,49 +271,57 @@ async function loadCacheFromDB() {
 
     console.log('[Cache] Loading data from Astra DB...');
 
-    // Load servers
-    const serversResp = await astraFetch('servers', 'GET', '?pageSize=100');
-    if (serversResp.ok && serversResp.data?.data) {
-        for (const row of serversResp.data.data) {
-            serverCache.set(row.server_id, deserializeServer(row));
-        }
-        console.log(`[Cache] Loaded ${serverCache.size} servers`);
+    // Helper to load all pages from an Astra table
+    async function loadAllRows(table, pageSize = 100) {
+        const allRows = [];
+        let pageState = null;
+        do {
+            const query = pageState
+                ? `?pageSize=${pageSize}&pageState=${encodeURIComponent(pageState)}`
+                : `?pageSize=${pageSize}`;
+            const resp = await astraFetch(table, 'GET', query);
+            if (!resp.ok || !resp.data?.data) break;
+            allRows.push(...resp.data.data);
+            pageState = resp.data.pageState || null;
+        } while (pageState);
+        return allRows;
     }
+
+    // Load servers
+    const serverRows = await loadAllRows('servers');
+    for (const row of serverRows) {
+        serverCache.set(row.server_id, deserializeServer(row));
+    }
+    console.log(`[Cache] Loaded ${serverCache.size} servers`);
 
     // Load sessions (only non-expired)
-    const sessionsResp = await astraFetch('sessions', 'GET', '?pageSize=500');
-    if (sessionsResp.ok && sessionsResp.data?.data) {
-        const now = Date.now();
-        let loaded = 0;
-        for (const row of sessionsResp.data.data) {
-            if (row.expires > now) {
-                const session = deserializeSession(row);
-                // Use decrypted token as cache key
-                const tokenKey = decrypt(row.session_token);
-                sessionCache.set(tokenKey, session);
-                loaded++;
-            }
+    const sessionRows = await loadAllRows('sessions', 500);
+    const now = Date.now();
+    let loadedSessions = 0;
+    for (const row of sessionRows) {
+        if (row.expires > now) {
+            const session = deserializeSession(row);
+            // Use tokenHash (the DB PK) as the cache key for consistent lookups
+            sessionCache.set(row.session_token, session);
+            loadedSessions++;
         }
-        console.log(`[Cache] Loaded ${loaded} active sessions`);
     }
+    console.log(`[Cache] Loaded ${loadedSessions} active sessions`);
 
     // Load purchases (only pending, not stale)
-    const purchasesResp = await astraFetch('purchases', 'GET', '?pageSize=500');
-    if (purchasesResp.ok && purchasesResp.data?.data) {
-        const now = Date.now();
-        let loaded = 0;
-        for (const row of purchasesResp.data.data) {
-            const age = now - row.created_at;
-            if (row.status === 'pending' && age < 600_000) {
-                purchaseCache.set(row.purchase_id, deserializePurchase(row));
-                loaded++;
-            } else if (row.status !== 'pending' && age < 300_000) {
-                purchaseCache.set(row.purchase_id, deserializePurchase(row));
-                loaded++;
-            }
+    const purchaseRows = await loadAllRows('purchases', 500);
+    let loadedPurchases = 0;
+    for (const row of purchaseRows) {
+        const age = now - row.created_at;
+        if (row.status === 'pending' && age < 600_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
+        } else if (row.status !== 'pending' && age < 300_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
         }
-        console.log(`[Cache] Loaded ${loaded} recent purchases`);
     }
+    console.log(`[Cache] Loaded ${loadedPurchases} recent purchases`);
 
     cacheReady = true;
     console.log('[Cache] Ready');
@@ -500,7 +530,8 @@ app.post('/api/register', async (req, res) => {
     if (ASTRA_TOKEN) {
         const result = await astraInsert('servers', serializeServer(server));
         if (!result.ok) {
-            console.error('[Astra] Failed to insert server — cache only');
+            serverCache.delete(serverId);
+            return res.status(503).json({ error: 'Failed to persist server registration' });
         }
     }
 
@@ -596,13 +627,15 @@ app.post('/api/session', requireApiKey, async (req, res) => {
         expires: Date.now() + 3_600_000,
     };
 
-    // Cache key is the plaintext token — encryption only applies to DB storage
-    sessionCache.set(token, session);
+    // Cache key is tokenHash(token) — consistent with DB PK and requireSession lookup
+    const sessionKey = tokenHash(token);
+    sessionCache.set(sessionKey, session);
 
     if (ASTRA_TOKEN) {
         const result = await astraInsert('sessions', serializeSession(token, session));
         if (!result.ok) {
-            console.error('[Astra] Session insert failed — cache only');
+            sessionCache.delete(sessionKey);
+            return res.status(503).json({ error: 'Failed to persist session' });
         }
     }
 
@@ -615,12 +648,12 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
 
     // Update all sessions for this player on this server
     const updates = [];
-    for (const [token, session] of sessionCache) {
+    for (const [sessionKey, session] of sessionCache) {
         if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
             session.balances = balances;
             if (ASTRA_TOKEN) {
-                // Use tokenHash for stable DB primary key lookup
-                updates.push(astraUpdate('sessions', tokenHash(token), {
+                // sessionKey is already tokenHash(token) — same as DB PK
+                updates.push(astraUpdate('sessions', sessionKey, {
                     balances_json: encryptJson(balances),
                 }).catch(e => console.error('[Astra] Session update failed:', e.message)));
             }
@@ -649,7 +682,7 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
             result_json: encrypt(JSON.stringify(purchase.result)),
         });
         if (!result.ok) {
-            console.error('[Astra] Purchase confirm failed — cache updated but DB not');
+            return res.status(503).json({ error: 'Failed to persist purchase confirmation' });
         }
     }
 
@@ -665,18 +698,19 @@ function requireSession(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
 
-    const session = sessionCache.get(token);
+    const sessionKey = tokenHash(token);
+    const session = sessionCache.get(sessionKey);
     if (!session) return res.status(401).json({ error: 'Invalid or expired session. Use /web in-game.' });
     if (session.expires < Date.now()) {
-        sessionCache.delete(token);
-        if (ASTRA_TOKEN) astraDelete('sessions', tokenHash(token)).catch(() => {});
+        sessionCache.delete(sessionKey);
+        if (ASTRA_TOKEN) astraDelete('sessions', sessionKey).catch(() => {});
         return res.status(401).json({ error: 'Session expired. Use /web in-game.' });
     }
 
     // Rolling 1-hour timeout
     session.expires = Date.now() + 3_600_000;
     if (ASTRA_TOKEN) {
-        astraUpdate('sessions', tokenHash(token), { expires: session.expires }).catch(() => {});
+        astraUpdate('sessions', sessionKey, { expires: session.expires }).catch(() => {});
     }
 
     req.session = session;
@@ -772,7 +806,8 @@ app.get('/api/:serverId/price-history', requireSession, (req, res) => {
 app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     const { item, amount } = req.body;
 
-    if (!item || !amount || amount < 1 || amount > 64) {
+    const parsedAmount = Number(amount);
+    if (!item || !Number.isInteger(parsedAmount) || parsedAmount < 1 || parsedAmount > 64) {
         return res.status(400).json({ error: 'Invalid item or amount' });
     }
 
@@ -783,7 +818,7 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
         type: 'buy',
         item,
         itemKey: item,
-        amount: Math.min(64, Math.max(1, parseInt(amount))),
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
     };
@@ -793,7 +828,8 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     if (ASTRA_TOKEN) {
         const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
         if (!result.ok) {
-            console.error('[Astra] Purchase insert failed — cache only');
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist purchase' });
         }
     }
 
@@ -804,8 +840,9 @@ app.post('/api/:serverId/buy', requireSession, async (req, res) => {
 app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     const { auctionId, amount } = req.body;
 
-    if (!auctionId || amount == null || amount <= 0) {
-        return res.status(400).json({ error: 'Invalid auction or amount' });
+    const parsedAuctionId = Number(auctionId);
+    if (!Number.isFinite(parsedAuctionId) || !Number.isInteger(parsedAuctionId)) {
+        return res.status(400).json({ error: 'Invalid auction ID' });
     }
 
     const parsedAmount = parseFloat(amount);
@@ -818,7 +855,7 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'bid',
-        auctionId: parseInt(auctionId),
+        auctionId: parsedAuctionId,
         amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
@@ -829,7 +866,8 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     if (ASTRA_TOKEN) {
         const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
         if (!result.ok) {
-            console.error('[Astra] Bid insert failed — cache only');
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist bid' });
         }
     }
 
@@ -840,12 +878,13 @@ app.post('/api/:serverId/bid', requireSession, async (req, res) => {
 app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     const { orderId, amount } = req.body;
 
-    if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
-        return res.status(400).json({ error: 'Invalid order or amount' });
+    const parsedOrderId = Number(orderId);
+    if (!Number.isFinite(parsedOrderId) || !Number.isInteger(parsedOrderId)) {
+        return res.status(400).json({ error: 'Invalid order ID' });
     }
 
-    const parsedAmount = parseInt(amount);
-    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+    const parsedAmount = Number(amount);
+    if (!Number.isInteger(parsedAmount) || parsedAmount <= 0) {
         return res.status(400).json({ error: 'Invalid fill amount' });
     }
 
@@ -854,7 +893,7 @@ app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'fill_order',
-        orderId: parseInt(orderId),
+        orderId: parsedOrderId,
         amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
@@ -865,7 +904,8 @@ app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     if (ASTRA_TOKEN) {
         const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
         if (!result.ok) {
-            console.error('[Astra] Order fill insert failed — cache only');
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist order fill' });
         }
     }
 
@@ -975,11 +1015,11 @@ function getPendingPurchases(serverId, playerUuid) {
 setInterval(() => {
     const now = Date.now();
 
-    for (const [token, session] of sessionCache) {
+    for (const [sessionKey, session] of sessionCache) {
         if (session.expires < now) {
-            sessionCache.delete(token);
+            sessionCache.delete(sessionKey);
             // Delete expired session from DB
-            if (ASTRA_TOKEN) astraDelete('sessions', tokenHash(token)).catch(() => {});
+            if (ASTRA_TOKEN) astraDelete('sessions', sessionKey).catch(() => {});
         }
     }
 
