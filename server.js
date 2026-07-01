@@ -4,6 +4,10 @@
  * A single Express instance that handles market dashboards
  * for multiple Minecraft servers. Each MC server syncs its
  * data here via outbound HTTP — no ports needed on the MC side.
+ * 
+ * Persistence: Astra DB (DataStax) via REST v2 API
+ * Caching: In-memory write-through cache for performance
+ * Encryption: AES-256-GCM field-level encryption for sensitive data
  */
 
 const express = require('express');
@@ -16,46 +20,430 @@ const rateLimit = require('express-rate-limit');
 
 const app = express();
 
-const MAX_RAM_MB = 500;
-const MAX_QUEUE_SIZE = 50;
-const registrationQueue = [];
+// ── Astra DB Configuration ──────────────────────────────────────
+const ASTRA_TOKEN = process.env.ASTRA_TOKEN || '';
+const ASTRA_DB_ID = process.env.ASTRA_DB_ID || 'e33e3332-1a75-468d-9736-75e058080cc4';
+const ASTRA_REGION = process.env.ASTRA_REGION || 'us-east-2';
+const ASTRA_KEYSPACE = process.env.ASTRA_KEYSPACE || 'Aurelium';
+const ASTRA_BASE = `https://${ASTRA_DB_ID}-${ASTRA_REGION}.apps.astra.datastax.com`;
+const ASTRA_REST = `${ASTRA_BASE}/api/rest/v2/keyspaces/${ASTRA_KEYSPACE}`;
+const ASTRA_TIMEOUT_MS = 10_000; // 10s timeout for all Astra REST calls
+
+// ── Field-Level Encryption ──────────────────────────────────────
+// AES-256-GCM encryption for sensitive fields stored in Astra DB.
+// ENCRYPTION_KEY is REQUIRED when ASTRA_TOKEN is set — the server
+// will refuse to start if persistence is enabled without encryption.
+// Encrypted values are prefixed with "enc:" for auto-detection on read.
+// Backward compatible: old plaintext data is read as-is.
+
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || '';
+const ENCRYPTION_PREFIX = 'enc:';
+const ALGORITHM = 'aes-256-gcm';
+const IV_LENGTH = 12;    // 96-bit IV for GCM
+const AUTH_TAG_LENGTH = 16; // 128-bit auth tag
+const KEY_LENGTH = 32;   // 256-bit key
+
+let encryptionEnabled = false;
+
+/**
+ * Derive a 32-byte key from the ENCRYPTION_KEY env var.
+ * Accepts either a 64-char hex string or any string (SHA-256 hashed).
+ */
+function deriveKey(rawKey) {
+    if (!rawKey) return null;
+    // If it's a valid 64-char hex string, use it directly
+    if (/^[0-9a-f]{64}$/i.test(rawKey)) {
+        return Buffer.from(rawKey, 'hex');
+    }
+    // Otherwise hash it to get a 32-byte key
+    return crypto.createHash('sha256').update(rawKey).digest();
+}
+
+const derivedKey = deriveKey(ENCRYPTION_KEY);
+if (derivedKey) {
+    encryptionEnabled = true;
+    console.log('[Encryption] AES-256-GCM field-level encryption enabled');
+} else if (ASTRA_TOKEN) {
+    // Fail closed: persistence without encryption is a security risk
+    console.error('[Encryption] FATAL: ASTRA_TOKEN is set but ENCRYPTION_KEY is missing.');
+    console.error('[Encryption] Sensitive data (API keys, player UUIDs) would be stored in plaintext.');
+    console.error('[Encryption] Set ENCRYPTION_KEY to any string to enable encryption, or remove ASTRA_TOKEN for in-memory mode.');
+    process.exit(1);
+} else {
+    console.log('[Encryption] No ENCRYPTION_KEY set — running in plaintext mode (in-memory only)');
+}
+
+/**
+ * Compute a stable HMAC-SHA256 hash of a token for use as a DB primary key.
+ * Unlike encrypt(), this is deterministic — same input always produces same output.
+ * Used for session_token PK in Astra DB so updates/deletes find the right row.
+ */
+function tokenHash(token) {
+    if (!derivedKey) return token; // No key — use plaintext as PK
+    return crypto.createHmac('sha256', derivedKey).update(token).digest('base64url');
+}
+
+/**
+ * Encrypt a plaintext string using AES-256-GCM.
+ * Returns "enc:<iv>:<ciphertext>:<authTag>" (all base64url).
+ * Returns the original value if encryption is disabled.
+ */
+function encrypt(plaintext) {
+    if (!encryptionEnabled || plaintext === null || plaintext === undefined) {
+        return plaintext;
+    }
+    const str = String(plaintext);
+    const iv = crypto.randomBytes(IV_LENGTH);
+    const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
+    let encrypted = cipher.update(str, 'utf8', 'base64url');
+    encrypted += cipher.final('base64url');
+    const authTag = cipher.getAuthTag().toString('base64url');
+    const ivB64 = iv.toString('base64url');
+    return `${ENCRYPTION_PREFIX}${ivB64}:${encrypted}:${authTag}`;
+}
+
+/**
+ * Decrypt a value that was encrypted by encrypt().
+ * Auto-detects encrypted values by the "enc:" prefix.
+ * Returns the original value if it's not encrypted or decryption is disabled.
+ */
+function decrypt(ciphertext) {
+    if (!ciphertext || typeof ciphertext !== 'string' || !ciphertext.startsWith(ENCRYPTION_PREFIX)) {
+        return ciphertext;
+    }
+    if (!encryptionEnabled) {
+        console.warn('[Encryption] Found encrypted value but no key available — returning raw');
+        return ciphertext;
+    }
+    try {
+        const parts = ciphertext.slice(ENCRYPTION_PREFIX.length).split(':');
+        if (parts.length !== 3) {
+            console.error('[Encryption] Malformed encrypted value');
+            return ciphertext;
+        }
+        const [ivB64, encData, authTagB64] = parts;
+        const iv = Buffer.from(ivB64, 'base64url');
+        const authTag = Buffer.from(authTagB64, 'base64url');
+        const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv, { authTagLength: AUTH_TAG_LENGTH });
+        decipher.setAuthTag(authTag);
+        let decrypted = decipher.update(encData, 'base64url', 'utf8');
+        decrypted += decipher.final('utf8');
+        return decrypted;
+    } catch (e) {
+        console.error('[Encryption] Decryption failed:', e.message);
+        return ciphertext;
+    }
+}
+
+/**
+ * Encrypt a JSON object: always serialize to JSON string first,
+ * then encrypt if encryption is enabled. Returns a string either way.
+ */
+function encryptJson(obj) {
+    if (obj === null || obj === undefined) return '{}';
+    const jsonStr = JSON.stringify(obj);
+    if (!encryptionEnabled) return jsonStr;
+    return encrypt(jsonStr);
+}
+
+/**
+ * Decrypt an encrypted JSON string back to an object.
+ * Falls back to JSON.parse for unencrypted values.
+ */
+function decryptJson(ciphertext) {
+    if (!ciphertext) return {};
+    const decrypted = decrypt(ciphertext);
+    if (typeof decrypted !== 'string' || decrypted.startsWith(ENCRYPTION_PREFIX)) {
+        // Decryption failed or not encrypted — try parsing as-is
+        try { return JSON.parse(ciphertext); } catch { return {}; }
+    }
+    try { return JSON.parse(decrypted); } catch { return {}; }
+}
+
+// ── In-Memory Write-Through Cache ──────────────────────────────
+// These cache Astra DB data for fast reads; writes go to DB first
+// Cache stores DECRYPTED values — encryption only applies to DB storage
+/** @type {Map<string, object>} serverId → server data */
+const serverCache = new Map();
+/** @type {Map<string, object>} tokenHash(token) → session data */
+const sessionCache = new Map();
+/** @type {Map<string, object>} purchaseId → purchase data */
+const purchaseCache = new Map();
+
+// Track if initial cache load is done
+let cacheReady = false;
+
+// ── Astra DB Helper ─────────────────────────────────────────────
+async function astraFetch(table, method, pathSuffix, body) {
+    // Query strings (?pageSize=...) go as-is; PK path segments get encoded
+    let encodedSuffix = '';
+    if (pathSuffix) {
+        if (pathSuffix.startsWith('?')) {
+            encodedSuffix = pathSuffix;
+        } else {
+            encodedSuffix = '/' + encodeURIComponent(pathSuffix);
+        }
+    }
+    const url = `${ASTRA_REST}/${table}${encodedSuffix}`;
+    const headers = {
+        'Authorization': `Bearer ${ASTRA_TOKEN}`,
+        'X-Cassandra-Token': ASTRA_TOKEN,
+        'Content-Type': 'application/json',
+    };
+    const opts = { method, headers, signal: AbortSignal.timeout(ASTRA_TIMEOUT_MS) };
+    if (body !== undefined) opts.body = JSON.stringify(body);
+
+    let resp;
+    try {
+        resp = await fetch(url, opts);
+    } catch (e) {
+        const errMsg = e.message || 'Network/timeout error';
+        console.error(`[Astra] ${method} ${url} → transport error: ${errMsg}`);
+        return { ok: false, status: 0, data: null, error: errMsg };
+    }
+    if (resp.status === 204 || resp.status === 201) return { ok: true, status: resp.status, data: null };
+    const text = await resp.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    if (!resp.ok) {
+        const errMsg = data?.description || data?.message || text.slice(0, 200);
+        console.error(`[Astra] ${method} ${url} → ${resp.status}: ${errMsg}`);
+        return { ok: false, status: resp.status, data, error: errMsg };
+    }
+    return { ok: true, status: resp.status, data };
+}
+
+// Get a single row by primary key
+async function astraGet(table, pk) {
+    return astraFetch(table, 'GET', pk);
+}
+
+// Insert a row
+async function astraInsert(table, row) {
+    return astraFetch(table, 'POST', '', row);
+}
+
+// Update a row (partial by PK)
+async function astraUpdate(table, pk, fields) {
+    return astraFetch(table, 'PUT', pk, fields);
+}
+
+// Delete a row by primary key
+async function astraDelete(table, pk) {
+    return astraFetch(table, 'DELETE', pk);
+}
+
+// Query rows with a filter (parameterized for CQL safety)
+async function astraQuery(table, column, value) {
+    const safeValue = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const url = `${ASTRA_REST}/${table}?where={"${column}":{"$eq":"${safeValue}"}}`;
+    let resp;
+    try {
+        resp = await fetch(url, {
+            headers: {
+                'Authorization': `Bearer ${ASTRA_TOKEN}`,
+                'X-Cassandra-Token': ASTRA_TOKEN,
+            },
+            signal: AbortSignal.timeout(ASTRA_TIMEOUT_MS),
+        });
+    } catch (e) {
+        const errMsg = e.message || 'Network/timeout error';
+        console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → transport error: ${errMsg}`);
+        return { ok: false, data: null, error: errMsg };
+    }
+    const text = await resp.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    if (!resp.ok) {
+        console.error(`[Astra] QUERY ${table} WHERE ${column}=${value} → ${resp.status}`);
+        return { ok: false, data: null };
+    }
+    return { ok: true, data: data?.data || [] };
+}
+
+// ── Cache Load on Startup ──────────────────────────────────────
+async function loadCacheFromDB() {
+    if (!ASTRA_TOKEN) {
+        console.log('[Cache] No ASTRA_TOKEN — running in memory-only mode');
+        cacheReady = true;
+        return;
+    }
+
+    console.log('[Cache] Loading data from Astra DB...');
+
+    // Helper to load all pages from an Astra table
+    async function loadAllRows(table, pageSize = 100) {
+        const allRows = [];
+        let pageState = null;
+        do {
+            const query = pageState
+                ? `?pageSize=${pageSize}&pageState=${encodeURIComponent(pageState)}`
+                : `?pageSize=${pageSize}`;
+            const resp = await astraFetch(table, 'GET', query);
+            if (!resp.ok || !resp.data?.data) break;
+            allRows.push(...resp.data.data);
+            pageState = resp.data.pageState || null;
+        } while (pageState);
+        return allRows;
+    }
+
+    // Load servers
+    const serverRows = await loadAllRows('servers');
+    for (const row of serverRows) {
+        serverCache.set(row.server_id, deserializeServer(row));
+    }
+    console.log(`[Cache] Loaded ${serverCache.size} servers`);
+
+    // Load sessions (only non-expired)
+    const sessionRows = await loadAllRows('sessions', 500);
+    const now = Date.now();
+    let loadedSessions = 0;
+    for (const row of sessionRows) {
+        if (row.expires > now) {
+            const session = deserializeSession(row);
+            // Use tokenHash (the DB PK) as the cache key for consistent lookups
+            sessionCache.set(row.session_token, session);
+            loadedSessions++;
+        }
+    }
+    console.log(`[Cache] Loaded ${loadedSessions} active sessions`);
+
+    // Load purchases (only pending, not stale)
+    const purchaseRows = await loadAllRows('purchases', 500);
+    let loadedPurchases = 0;
+    for (const row of purchaseRows) {
+        const age = now - row.created_at;
+        if (row.status === 'pending' && age < 600_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
+        } else if (row.status !== 'pending' && age < 300_000) {
+            purchaseCache.set(row.purchase_id, deserializePurchase(row));
+            loadedPurchases++;
+        }
+    }
+    console.log(`[Cache] Loaded ${loadedPurchases} recent purchases`);
+
+    cacheReady = true;
+    console.log('[Cache] Ready');
+}
+
+// ── Serialization Helpers (with encryption) ─────────────────────
+// Serialization ENCRYPTS sensitive fields before writing to Astra DB.
+// Deserialization DECRYPTS fields when reading from Astra DB.
+// The in-memory cache always stores plaintext (decrypted) values.
+// Session PK uses tokenHash() for stable DB primary key.
+
+function serializeServer(s) {
+    return {
+        server_id: s.serverId,
+        api_key: encrypt(s.apiKey),
+        server_name: s.serverName || 'Minecraft Server',
+        last_sync: s.lastSync || Date.now(),
+        categories_json: JSON.stringify(s.categories || []),
+        items_json: JSON.stringify(s.items || {}),
+        auctions_json: s.auctionsJson || '[]',
+        orders_json: s.ordersJson || '[]',
+        stocks_json: s.stocksJson || '[]',
+        price_history_json: s.priceHistoryJson || '{}',
+    };
+}
+
+function deserializeServer(row) {
+    let categories = [], items = {};
+    try { categories = JSON.parse(row.categories_json || '[]'); } catch {}
+    try { items = JSON.parse(row.items_json || '{}'); } catch {}
+    return {
+        serverId: row.server_id,
+        apiKey: decrypt(row.api_key),
+        serverName: row.server_name,
+        lastSync: row.last_sync,
+        categories,
+        items,
+        auctionsJson: row.auctions_json || '[]',
+        ordersJson: row.orders_json || '[]',
+        stocksJson: row.stocks_json || '[]',
+        priceHistoryJson: row.price_history_json || '{}',
+    };
+}
+
+function serializeSession(token, s) {
+    return {
+        session_token: tokenHash(token),  // Stable PK (HMAC, not random IV encrypt)
+        server_id: s.serverId,
+        player_uuid: encrypt(s.playerUuid),
+        player_name: s.playerName || 'Player',
+        balances_json: encryptJson(s.balances || {}),
+        default_currency: s.defaultCurrency || 'Aurels',
+        expires: s.expires,
+    };
+}
+
+function deserializeSession(row) {
+    return {
+        serverId: row.server_id,
+        playerUuid: decrypt(row.player_uuid),
+        playerName: row.player_name || 'Player',
+        balances: decryptJson(row.balances_json),
+        defaultCurrency: row.default_currency || 'Aurels',
+        expires: row.expires,
+    };
+}
+
+function serializePurchase(id, p) {
+    return {
+        purchase_id: id,
+        server_id: p.serverId,
+        player_uuid: encrypt(p.playerUuid),
+        type: p.type,
+        item_key: p.item || p.itemKey || '',
+        auction_id: p.auctionId || 0,
+        order_id: p.orderId || 0,
+        amount: String(p.amount || 0),
+        status: p.status,
+        created_at: p.createdAt,
+        result_json: p.result ? encrypt(JSON.stringify(p.result)) : '',
+    };
+}
+
+function deserializePurchase(row) {
+    let result = null;
+    const resultRaw = decrypt(row.result_json || '');
+    try { result = JSON.parse(resultRaw || 'null'); } catch {}
+    return {
+        serverId: row.server_id,
+        playerUuid: decrypt(row.player_uuid),
+        type: row.type,
+        item: row.item_key,
+        itemKey: row.item_key,
+        auctionId: row.auction_id,
+        orderId: row.order_id,
+        amount: row.type === 'bid' || row.type === 'fill_order' ? parseFloat(row.amount) : parseInt(row.amount),
+        status: row.status,
+        createdAt: row.created_at,
+        result,
+    };
+}
 
 // ── Security Middleware ──────────────────────────────────────────
-app.use(helmet({ contentSecurityPolicy: false })); // CSP disabled for inline styles
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
 app.use(express.json({ limit: '7mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
     windowMs: 60_000,
-    max: 330, // Increased to 330 as requested
+    max: 330,
     standardHeaders: true,
     legacyHeaders: false,
     message: { error: 'Too many requests, please slow down.' },
-    // Skip rate limiting for MC servers that provide a valid API Key
-    skip: (req) => { const sid = req.headers['x-server-id']; const s = servers.get(sid); return s && s.apiKey === req.headers['x-api-key']; }
+    skip: (req) => {
+        const sid = req.headers['x-server-id'];
+        const s = serverCache.get(sid);
+        return s && s.apiKey === req.headers['x-api-key'];
+    }
 }));
 
-// ── In-Memory Data Stores ────────────────────────────────────────
-
-/** @type {Map<string, ServerData>} serverId → full dashboard data */
-const servers = new Map();
-
-/** @type {Map<string, SessionData>} token → session data */
-const sessions = new Map();
-
-/** @type {Map<string, PurchaseData>} purchaseId → purchase data */
-const purchases = new Map();
-
-// ── Types (for documentation) ────────────────────────────────────
-// ServerData:  { apiKey, serverName, lastSync, categories[], items{},
-//               auctionsJson, ordersJson, stocksJson, priceHistoryJson }
-//   → auctions/orders/stocks/priceHistory stored as raw JSON strings for RAM efficiency
-// SessionData: { serverId, playerUuid, playerName, balances, defaultCurrency, expires }
-// PurchaseData: { serverId, playerUuid, item, amount, status, createdAt }
-
 // ── Middleware: API Key Auth ─────────────────────────────────────
-
 function requireApiKey(req, res, next) {
     const serverId = req.params.serverId || req.body.serverId || req.query.serverId;
     const apiKey = req.headers['x-api-key'];
@@ -64,7 +452,7 @@ function requireApiKey(req, res, next) {
         return res.status(401).json({ error: 'Missing server ID or API key' });
     }
 
-    const server = servers.get(serverId);
+    const server = serverCache.get(serverId);
     if (!server || server.apiKey !== apiKey) {
         return res.status(403).json({ error: 'Invalid server ID or API key' });
     }
@@ -79,52 +467,53 @@ function requireApiKey(req, res, next) {
 // ══════════════════════════════════════════════════════════════════
 
 /** POST /api/register — MC plugin registers on startup */
-app.post('/api/register', (req, res) => {
-  const regSecret = process.env.REGISTRATION_SECRET || '';
-  if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
-    return res.status(403).json({ error: 'Invalid registration secret' });
-  }
+app.post('/api/register', async (req, res) => {
+    const regSecret = process.env.REGISTRATION_SECRET || '';
+    if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+        return res.status(403).json({ error: 'Invalid registration secret' });
+    }
     const { serverId, apiKey, serverName } = req.body;
 
     if (!serverId || !apiKey) {
         return res.status(400).json({ error: 'Missing serverId or apiKey' });
     }
 
-    // If server already exists, validate the key
-    if (servers.has(serverId)) {
-        const existing = servers.get(serverId);
+    // If server already exists in cache, validate the key
+    if (serverCache.has(serverId)) {
+        const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
             return res.status(403).json({ error: 'API key mismatch for this server ID' });
         }
-    } else {
-        // Enforce Max RAM Activation Queue
-        const memoryUsage = process.memoryUsage();
-        const rssMB = memoryUsage.rss / 1024 / 1024;
-
-        if (rssMB > MAX_RAM_MB) {
-            if (registrationQueue.length >= MAX_QUEUE_SIZE) {
-                return res.status(503).json({ error: 'Registration queue is full. Try again later.' });
-            }
-            if (!registrationQueue.includes(serverId)) {
-                registrationQueue.push(serverId);
-            }
-            const position = registrationQueue.indexOf(serverId) + 1;
-            console.log(`[Queue] Waitlisting "${serverName}" (${serverId}). RAM at ${Math.round(rssMB)}MB. Queue pos: ${position}`);
-            return res.status(503).json({ error: 'Server waitlisted due to max RAM usage', queued: true, position });
+        // Re-register: update lastSync
+        existing.lastSync = Date.now();
+        if (ASTRA_TOKEN) {
+            astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(e =>
+                console.error('[Astra] Failed to update lastSync:', e.message)
+            );
         }
+        return res.json({ success: true });
+    }
 
-        // If memory is okay, but they are in the queue, only allow them if they are first (fairness)
-        if (registrationQueue.includes(serverId)) {
-            if (registrationQueue[0] !== serverId) {
-                const position = registrationQueue.indexOf(serverId) + 1;
-                return res.status(503).json({ error: 'Waiting in registration queue', queued: true, position });
-            } else {
-                registrationQueue.shift(); // Proceed to register
+    // Check Astra DB for existing server (may have survived a restart)
+    if (ASTRA_TOKEN) {
+        const dbResult = await astraGet('servers', serverId);
+        if (dbResult.ok && dbResult.data?.data) {
+            const existing = deserializeServer(dbResult.data.data);
+            if (existing.apiKey !== apiKey) {
+                return res.status(403).json({ error: 'API key mismatch for this server ID' });
             }
+            // Restore to cache
+            existing.lastSync = Date.now();
+            serverCache.set(serverId, existing);
+            astraUpdate('servers', serverId, { last_sync: existing.lastSync }).catch(() => {});
+            console.log(`[Register] Restored server "${existing.serverName}" from DB (${serverId})`);
+            return res.json({ success: true });
         }
     }
 
-    servers.set(serverId, {
+    // New server — create it
+    const server = {
+        serverId,
         apiKey,
         serverName: serverName || 'Minecraft Server',
         lastSync: Date.now(),
@@ -134,14 +523,24 @@ app.post('/api/register', (req, res) => {
         ordersJson: '[]',
         stocksJson: '[]',
         priceHistoryJson: '{}',
-    });
+    };
+
+    serverCache.set(serverId, server);
+
+    if (ASTRA_TOKEN) {
+        const result = await astraInsert('servers', serializeServer(server));
+        if (!result.ok) {
+            serverCache.delete(serverId);
+            return res.status(503).json({ error: 'Failed to persist server registration' });
+        }
+    }
 
     console.log(`[Register] Server "${serverName}" registered as ${serverId}`);
     res.json({ success: true });
 });
 
 /** POST /api/sync — MC plugin pushes market data + auctions + orders + stocks */
-app.post('/api/sync', requireApiKey, (req, res) => {
+app.post('/api/sync', requireApiKey, async (req, res) => {
     const { categories, items, auctions, orders, stocks, priceHistory, customItems } = req.body;
     const server = req.server;
 
@@ -149,7 +548,6 @@ app.post('/api/sync', requireApiKey, (req, res) => {
     if (items) server.items = items;
 
     // ── Custom Items from Aurelium Scanner ─────────────────
-    // Merge scanner-discovered custom items — refreshed every sync
     const safeItems = Array.isArray(customItems) ? customItems : [];
     const mapped = safeItems
         .filter(item => typeof item === 'object' && item !== null && typeof item.name === 'string')
@@ -183,61 +581,110 @@ app.post('/api/sync', requireApiKey, (req, res) => {
         if (catIdx !== -1) server.categories.splice(catIdx, 1);
     }
 
-    // Store bulk data as raw JSON strings to minimize RAM footprint
+    // Store bulk data as raw JSON strings
     if (auctions) server.auctionsJson = JSON.stringify(auctions);
     if (orders) server.ordersJson = JSON.stringify(orders);
     if (stocks) server.stocksJson = JSON.stringify(stocks);
     if (priceHistory) server.priceHistoryJson = JSON.stringify(priceHistory);
     server.lastSync = Date.now();
 
-    res.json({ success: true, pendingPurchases: getPendingPurchases(req.serverId).map(p => ({ id: p.id, itemKey: p.itemKey, amount: p.amount, currency: p.currency, status: p.status })) });
+    // Persist to Astra (fire-and-forget for sync — data is in cache either way)
+    if (ASTRA_TOKEN) {
+        astraUpdate('servers', req.serverId, {
+            categories_json: JSON.stringify(server.categories),
+            items_json: JSON.stringify(server.items),
+            auctions_json: server.auctionsJson,
+            orders_json: server.ordersJson,
+            stocks_json: server.stocksJson,
+            price_history_json: server.priceHistoryJson,
+            last_sync: server.lastSync,
+        }).catch(e => console.error('[Astra] Sync write failed:', e.message));
+    }
+
+    res.json({
+        success: true,
+        pendingPurchases: getPendingPurchases(req.serverId).map(p => ({
+            id: p.id, itemKey: p.itemKey, amount: p.amount,
+            currency: p.currency, status: p.status,
+        })),
+    });
 });
 
 /** POST /api/session — MC plugin creates a player session */
-app.post('/api/session', requireApiKey, (req, res) => {
+app.post('/api/session', requireApiKey, async (req, res) => {
     const { token, playerUuid, playerName, balances, defaultCurrency } = req.body;
 
     if (!token || !playerUuid) {
         return res.status(400).json({ error: 'Missing token or playerUuid' });
     }
 
-    sessions.set(token, {
+    const session = {
         serverId: req.serverId,
         playerUuid,
         playerName: playerName || 'Player',
         balances: balances || {},
         defaultCurrency: defaultCurrency || 'Aurels',
-        expires: Date.now() + 3_600_000, // 1 hour hardcoded
-    });
+        expires: Date.now() + 3_600_000,
+    };
 
-    res.json({ success: true });
-});
+    // Cache key is tokenHash(token) — consistent with DB PK and requireSession lookup
+    const sessionKey = tokenHash(token);
+    sessionCache.set(sessionKey, session);
 
-/** POST /api/session-update — MC plugin updates a player's balance after purchase */
-app.post('/api/session-update', requireApiKey, (req, res) => {
-    const { playerUuid, balances } = req.body;
-
-    // Update all sessions for this player on this server
-    for (const [token, session] of sessions) {
-        if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
-            session.balances = balances;
+    if (ASTRA_TOKEN) {
+        const result = await astraInsert('sessions', serializeSession(token, session));
+        if (!result.ok) {
+            sessionCache.delete(sessionKey);
+            return res.status(503).json({ error: 'Failed to persist session' });
         }
     }
 
     res.json({ success: true });
 });
 
+/** POST /api/session-update — MC plugin updates a player's balance after purchase */
+app.post('/api/session-update', requireApiKey, async (req, res) => {
+    const { playerUuid, balances } = req.body;
+
+    // Update all sessions for this player on this server
+    const updates = [];
+    for (const [sessionKey, session] of sessionCache) {
+        if (session.serverId === req.serverId && session.playerUuid === playerUuid) {
+            session.balances = balances;
+            if (ASTRA_TOKEN) {
+                // sessionKey is already tokenHash(token) — same as DB PK
+                updates.push(astraUpdate('sessions', sessionKey, {
+                    balances_json: encryptJson(balances),
+                }).catch(e => console.error('[Astra] Session update failed:', e.message)));
+            }
+        }
+    }
+
+    await Promise.allSettled(updates);
+    res.json({ success: true });
+});
+
 /** POST /api/confirm-purchase — MC plugin confirms a purchase was executed */
-app.post('/api/confirm-purchase', requireApiKey, (req, res) => {
+app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
     const { purchaseId, success, newBalance, spent } = req.body;
 
-    const purchase = purchases.get(purchaseId);
+    const purchase = purchaseCache.get(purchaseId);
     if (!purchase || purchase.serverId !== req.serverId) {
         return res.status(404).json({ error: 'Purchase not found' });
     }
 
     purchase.status = success ? 'completed' : 'failed';
     purchase.result = { newBalance, spent, success };
+
+    if (ASTRA_TOKEN) {
+        const result = await astraUpdate('purchases', purchaseId, {
+            status: purchase.status,
+            result_json: encrypt(JSON.stringify(purchase.result)),
+        });
+        if (!result.ok) {
+            return res.status(503).json({ error: 'Failed to persist purchase confirmation' });
+        }
+    }
 
     res.json({ success: true });
 });
@@ -251,19 +698,24 @@ function requireSession(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
 
-    const session = sessions.get(token);
+    const sessionKey = tokenHash(token);
+    const session = sessionCache.get(sessionKey);
     if (!session) return res.status(401).json({ error: 'Invalid or expired session. Use /web in-game.' });
     if (session.expires < Date.now()) {
-        sessions.delete(token);
+        sessionCache.delete(sessionKey);
+        if (ASTRA_TOKEN) astraDelete('sessions', sessionKey).catch(() => {});
         return res.status(401).json({ error: 'Session expired. Use /web in-game.' });
     }
 
-    // Rolling 1-hour timeout: reset on every activity
+    // Rolling 1-hour timeout
     session.expires = Date.now() + 3_600_000;
+    if (ASTRA_TOKEN) {
+        astraUpdate('sessions', sessionKey, { expires: session.expires }).catch(() => {});
+    }
 
     req.session = session;
     req.serverId = session.serverId;
-    req.server = servers.get(session.serverId);
+    req.server = serverCache.get(session.serverId);
 
     if (!req.server) {
         return res.status(503).json({ error: 'Server is offline' });
@@ -330,91 +782,132 @@ app.get('/api/:serverId/search', requireSession, (req, res) => {
     res.json({ page, totalPages, totalItems: results.length, items: pageItems });
 });
 
-/** GET /api/:serverId/auctions — Browser gets active auctions (streamed from cache) */
+/** GET /api/:serverId/auctions — Browser gets active auctions */
 app.get('/api/:serverId/auctions', requireSession, (req, res) => {
     res.type('json').send(req.server.auctionsJson || '[]');
 });
 
-/** GET /api/:serverId/orders — Browser gets active buy orders (streamed from cache) */
+/** GET /api/:serverId/orders — Browser gets active buy orders */
 app.get('/api/:serverId/orders', requireSession, (req, res) => {
     res.type('json').send(req.server.ordersJson || '[]');
 });
 
-/** GET /api/:serverId/stocks — Browser gets stock/price data (streamed from cache) */
+/** GET /api/:serverId/stocks — Browser gets stock/price data */
 app.get('/api/:serverId/stocks', requireSession, (req, res) => {
     res.type('json').send(req.server.stocksJson || '[]');
 });
 
-/** GET /api/:serverId/price-history — Browser gets price history for charts (streamed from cache) */
+/** GET /api/:serverId/price-history — Browser gets price history for charts */
 app.get('/api/:serverId/price-history', requireSession, (req, res) => {
     res.type('json').send(req.server.priceHistoryJson || '{}');
 });
 
 /** POST /api/:serverId/buy — Browser submits a purchase */
-app.post('/api/:serverId/buy', requireSession, (req, res) => {
+app.post('/api/:serverId/buy', requireSession, async (req, res) => {
     const { item, amount } = req.body;
 
-    if (!item || !amount || amount < 1 || amount > 64) {
+    const parsedAmount = Number(amount);
+    if (!item || !Number.isInteger(parsedAmount) || parsedAmount < 1 || parsedAmount > 64) {
         return res.status(400).json({ error: 'Invalid item or amount' });
     }
 
     const purchaseId = crypto.randomUUID();
-
-    purchases.set(purchaseId, {
+    const purchase = {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'buy',
         item,
-        amount: Math.min(64, Math.max(1, parseInt(amount))),
+        itemKey: item,
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
-    });
+    };
+
+    purchaseCache.set(purchaseId, purchase);
+
+    if (ASTRA_TOKEN) {
+        const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
+        if (!result.ok) {
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist purchase' });
+        }
+    }
 
     res.json({ success: true, purchaseId, message: 'Purchase queued — delivering in-game...' });
 });
 
 /** POST /api/:serverId/bid — Browser submits an auction bid */
-app.post('/api/:serverId/bid', requireSession, (req, res) => {
+app.post('/api/:serverId/bid', requireSession, async (req, res) => {
     const { auctionId, amount } = req.body;
 
-    if (!auctionId || amount == null || amount <= 0) {
-        return res.status(400).json({ error: 'Invalid auction or amount' });
+    const parsedAuctionId = Number(auctionId);
+    if (!Number.isFinite(parsedAuctionId) || !Number.isInteger(parsedAuctionId)) {
+        return res.status(400).json({ error: 'Invalid auction ID' });
+    }
+
+    const parsedAmount = parseFloat(amount);
+    if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ error: 'Invalid bid amount' });
     }
 
     const purchaseId = crypto.randomUUID();
-
-    purchases.set(purchaseId, {
+    const purchase = {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'bid',
-        auctionId: parseInt(auctionId),
-        amount: isNaN(parseFloat(amount)) ? 0 : parseFloat(amount),
+        auctionId: parsedAuctionId,
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
-    });
+    };
+
+    purchaseCache.set(purchaseId, purchase);
+
+    if (ASTRA_TOKEN) {
+        const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
+        if (!result.ok) {
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist bid' });
+        }
+    }
 
     res.json({ success: true, purchaseId, message: 'Bid queued — confirming in-game...' });
 });
 
 /** POST /api/:serverId/fill-order — Browser submits items to fulfill a buy order */
-app.post('/api/:serverId/fill-order', requireSession, (req, res) => {
+app.post('/api/:serverId/fill-order', requireSession, async (req, res) => {
     const { orderId, amount } = req.body;
 
-    if (!orderId || amount == null || isNaN(Number(amount)) || amount <= 0) {
-        return res.status(400).json({ error: 'Invalid order or amount' });
+    const parsedOrderId = Number(orderId);
+    if (!Number.isFinite(parsedOrderId) || !Number.isInteger(parsedOrderId)) {
+        return res.status(400).json({ error: 'Invalid order ID' });
+    }
+
+    const parsedAmount = Number(amount);
+    if (!Number.isInteger(parsedAmount) || parsedAmount <= 0) {
+        return res.status(400).json({ error: 'Invalid fill amount' });
     }
 
     const purchaseId = crypto.randomUUID();
-
-    purchases.set(purchaseId, {
+    const purchase = {
         serverId: req.serverId,
         playerUuid: req.session.playerUuid,
         type: 'fill_order',
-        orderId: parseInt(orderId),
-        amount: parseInt(amount),
+        orderId: parsedOrderId,
+        amount: parsedAmount,
         status: 'pending',
         createdAt: Date.now(),
-    });
+    };
+
+    purchaseCache.set(purchaseId, purchase);
+
+    if (ASTRA_TOKEN) {
+        const result = await astraInsert('purchases', serializePurchase(purchaseId, purchase));
+        if (!result.ok) {
+            purchaseCache.delete(purchaseId);
+            return res.status(503).json({ error: 'Failed to persist order fill' });
+        }
+    }
 
     res.json({ success: true, purchaseId, message: 'Fulfillment queued — verifying in-game inventory...' });
 });
@@ -422,11 +915,11 @@ app.post('/api/:serverId/fill-order', requireSession, (req, res) => {
 /** GET /api/:serverId/purchase-status?id=X — Browser polls purchase result */
 app.get('/api/:serverId/purchase-status', requireSession, (req, res) => {
     const id = req.query.id;
-    const purchase = purchases.get(id);
+    const purchase = purchaseCache.get(id);
 
     if (!purchase) return res.status(404).json({ error: 'Purchase not found' });
 
-    // IDOR protection: only the purchase owner can check status
+    // IDOR protection
     if (purchase.playerUuid !== req.session.playerUuid) {
         return res.status(403).json({ error: 'Not your purchase' });
     }
@@ -441,7 +934,6 @@ app.get('/api/:serverId/purchase-status', requireSession, (req, res) => {
 // STATIC FILES + DASHBOARD PAGE
 // ══════════════════════════════════════════════════════════════════
 
-// Serve static frontend files
 app.use('/static', express.static(path.join(__dirname, 'public')));
 
 // Landing page
@@ -470,8 +962,7 @@ p { color:#9a9aad; font-size:15px; line-height:1.5; margin:0 0 32px 0; }
 code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; font-weight:600; font-family:monospace; border:1px solid #2d2e36; }
 .link-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:12px 24px; background:#3b82f6; color:#fff; text-decoration:none; border-radius:8px; font-weight:600; font-size:14px; transition:all 0.2s ease; width:100%; box-sizing:border-box; }
 .link-btn:hover { background:#2563eb; transform:translateY(-1px); box-shadow:0 4px 12px rgba(59,130,246,0.3); }
-</style></head>
-<body>
+</style></head><body>
 <div class="box">
     <div class="logo">
         <svg viewBox="0 0 24 24"><path d="M14.5 2l7.5 7.5-7 7-7.5-7.5z"/><path d="M2 22l7-7"/><path d="M11 13l3.5-3.5"/></svg>
@@ -486,9 +977,8 @@ code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; fo
 </body></html>`);
 });
 
-// Dashboard entry point — serves index.html with GA4 injection
+// Dashboard entry point
 let indexHtmlCache = null;
-// Invalidate cache hourly so redeploys take effect without restart
 setInterval(() => { indexHtmlCache = null; }, 3600_000);
 app.get('/shop/:serverId', (req, res) => {
     try {
@@ -510,7 +1000,7 @@ app.get('/shop/:serverId', (req, res) => {
 
 function getPendingPurchases(serverId, playerUuid) {
     const pending = [];
-    for (const [id, p] of purchases) {
+    for (const [id, p] of purchaseCache) {
         if (p.serverId === serverId && p.status === 'pending' && (!playerUuid || p.playerUuid === playerUuid)) {
             pending.push({ id, ...p });
         }
@@ -518,25 +1008,39 @@ function getPendingPurchases(serverId, playerUuid) {
     return pending;
 }
 
-// Cleanup expired sessions and old purchases every 60 seconds
+// Cleanup expired sessions and old purchases every 60 seconds.
+// Cache eviction only — does NOT delete from Astra DB.
+// DB records persist for crash recovery; stale DB rows are
+// filtered out on startup load (expired sessions, old purchases).
 setInterval(() => {
     const now = Date.now();
-    for (const [token, session] of sessions) {
-        if (session.expires < now) sessions.delete(token);
+
+    for (const [sessionKey, session] of sessionCache) {
+        if (session.expires < now) {
+            sessionCache.delete(sessionKey);
+            // Delete expired session from DB
+            if (ASTRA_TOKEN) astraDelete('sessions', sessionKey).catch(() => {});
+        }
     }
-    // Remove completed/failed purchases older than 5 minutes
-    // Remove pending purchases older than 10 minutes (server went offline)
-    for (const [id, p] of purchases) {
-        if (p.status !== 'pending' && now - p.createdAt > 300_000) purchases.delete(id);
-        else if (p.status === 'pending' && now - p.createdAt > 600_000) purchases.delete(id);
+
+    for (const [id, p] of purchaseCache) {
+        if (p.status !== 'pending' && now - p.createdAt > 300_000) {
+            purchaseCache.delete(id);
+            // Completed/failed purchases: evict from cache, keep in DB for audit trail
+        } else if (p.status === 'pending' && now - p.createdAt > 600_000) {
+            purchaseCache.delete(id);
+            // Stale pending purchases: evict from cache, mark expired in DB
+            if (ASTRA_TOKEN) astraUpdate('purchases', id, { status: 'expired' }).catch(() => {});
+        }
     }
-    // Remove stale servers (no sync in 5 minutes, no active sessions)
-    for (const [id, server] of servers) {
+
+    for (const [id, server] of serverCache) {
         if (now - server.lastSync > 300_000) {
-            const hasActive = [...sessions.values()].some(s => s.serverId === id);
+            const hasActive = [...sessionCache.values()].some(s => s.serverId === id);
             if (!hasActive) {
-                console.log(`[Cleanup] Removing stale server "${server.serverName}" (${id})`);
-                servers.delete(id);
+                console.log(`[Cleanup] Evicting stale server "${server.serverName}" (${id}) from cache`);
+                serverCache.delete(id);
+                // Server stays in DB — will be restored on next register/sync
             }
         }
     }
@@ -547,6 +1051,19 @@ setInterval(() => {
 // ══════════════════════════════════════════════════════════════════
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Aurelium Web Dashboard running on port ${PORT}`);
+
+async function start() {
+    // Load cache from Astra DB before serving requests
+    await loadCacheFromDB();
+
+    app.listen(PORT, () => {
+        console.log(`Aurelium Web Dashboard running on port ${PORT}`);
+        console.log(`Persistence: ${ASTRA_TOKEN ? 'Astra DB + in-memory cache' : 'in-memory only (no ASTRA_TOKEN)'}`);
+        console.log(`Encryption: ${encryptionEnabled ? 'AES-256-GCM (field-level)' : 'disabled (no ENCRYPTION_KEY)'}`);
+    });
+}
+
+start().catch(e => {
+    console.error('Failed to start:', e);
+    process.exit(1);
 });
