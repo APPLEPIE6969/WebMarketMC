@@ -11,14 +11,5 @@
       "src": "/(.*)",
       "dest": "server.js"
     }
-  ],
-  "env": {
-    "ASTRA_TOKEN": "@astra_token",
-    "ASTRA_DB_ID": "@astra_db_id",
-    "ASTRA_REGION": "@astra_region",
-    "ASTRA_KEYSPACE": "@astra_keyspace",
-    "ENCRYPTION_KEY": "@encryption_key",
-    "REGISTRATION_SECRET": "@registration_secret",
-    "GA_MEASUREMENT_ID": "@ga_measurement_id"
-  }
+  ]
 }
