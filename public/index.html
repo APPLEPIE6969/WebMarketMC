@@ -83,8 +83,9 @@
         </div>
         <div class="header-right">
             <div class="refresh-timer" id="refresh-info" title="Data updates automatically">
-                <svg class="icon" viewBox="0 0 24 24">
-                    <path d="M21.5 2v6h-6M2.13 15.57a10 10 10 0 1 0-8.91-8.91L2.5 9" />
+                <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"/>
+                    <polyline points="12 6 12 12 16 14"/>
                 </svg>
                 <span id="refresh-countdown">20s</span>
             </div>
@@ -142,36 +143,44 @@
 
     <!-- ═══════ PAGE: AUCTION ═══════ -->
     <div class="page-content hidden" id="page-auction">
-        <div class="page-header-bar">
-            <h2>
-                <svg class="icon" style="width:24px;height:24px;margin-bottom:-4px;margin-right:8px;color:var(--blue)"
-                    viewBox="0 0 24 24">
-                    <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
-                    <path d="M7 7h.01" />
-                </svg>
-                Auction House
-            </h2>
-            <p class="page-subtitle">Browse active auctions — bid or buy in-game</p>
-        </div>
-        <div class="auction-controls">
-            <div class="auction-search-bar">
-                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <circle cx="11" cy="11" r="8" />
-                    <path d="m21 21-4.35-4.35" />
-                </svg>
-                <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
-            </div>
-        </div>
-        <div class="auction-grid" id="auction-grid"></div>
-        <div class="empty-state" id="auction-empty" style="display:none;">
-            <div class="empty-icon">
-                <svg class="icon icon-lg" viewBox="0 0 24 24">
-                    <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
-                    <path d="M7 7h.01" />
-                </svg>
-            </div>
-            <h3>No active auctions</h3>
-            <p>Check back later or list items in-game.</p>
+        <div class="layout">
+            <nav class="sidebar" id="auction-sidebar">
+                <div class="sidebar-header">Categories</div>
+                <div class="sidebar-items" id="auction-sidebar-categories"></div>
+            </nav>
+            <main class="content">
+                <div class="page-header-bar" style="padding:0 0 16px;">
+                    <h2>
+                        <svg class="icon" style="width:24px;height:24px;margin-bottom:-4px;margin-right:8px;color:var(--blue)"
+                            viewBox="0 0 24 24">
+                            <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
+                            <path d="M7 7h.01" />
+                        </svg>
+                        Auction House
+                    </h2>
+                    <p class="page-subtitle">Browse active auctions — bid or buy in-game</p>
+                </div>
+                <div class="auction-controls">
+                    <div class="auction-search-bar">
+                        <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8" />
+                            <path d="m21 21-4.35-4.35" />
+                        </svg>
+                        <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
+                    </div>
+                </div>
+                <div class="auction-grid" id="auction-grid"></div>
+                <div class="empty-state" id="auction-empty" style="display:none;">
+                    <div class="empty-icon">
+                        <svg class="icon icon-lg" viewBox="0 0 24 24">
+                            <path d="M12 2H2v10l9.29 9.29c.94.94 2.48.94 3.42 0l6.58-6.58c.94-.94.94-2.48 0-3.42L12 2Z" />
+                            <path d="M7 7h.01" />
+                        </svg>
+                    </div>
+                    <h3 id="auction-empty-title">No active auctions</h3>
+                    <p id="auction-empty-sub">Check back later or list items in-game.</p>
+                </div>
+            </main>
         </div>
     </div>
 
@@ -237,11 +246,18 @@
         </div>
         <div class="stocks-controls">
             <input type="text" id="stocks-search" placeholder="Search items..." autocomplete="off">
-            <select id="stocks-sort">
-                <option value="name">Sort by Name</option>
-                <option value="buyPrice">Sort by Buy Price</option>
-                <option value="change">Sort by Change %</option>
-            </select>
+            <div class="custom-select" id="stocks-sort">
+                <button type="button" class="custom-select-trigger" aria-haspopup="listbox" aria-expanded="false">
+                    <span class="custom-select-value">Sort by Name</span>
+                    <svg class="custom-select-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                </button>
+                <ul class="custom-select-options" role="listbox" aria-label="Sort options">
+                    <li role="option" data-value="name" class="selected">Sort by Name</li>
+                    <li role="option" data-value="buyPrice">Sort by Buy Price</li>
+                    <li role="option" data-value="sellPrice">Sort by Sell Price</li>
+                    <li role="option" data-value="change">Sort by Change %</li>
+                </ul>
+            </div>
         </div>
         <div class="stocks-table-wrap" id="stocks-table-wrap">
             <table class="stocks-table" id="stocks-table">
@@ -279,7 +295,7 @@
                     </div>
                 </div>
                 <div class="amount-selector" id="auction-amount-selector">
-                    <label>Your Bid</label>
+                    <label id="auction-amount-label">Your Bid</label>
                     <div class="amount-controls" style="flex:1;">
                         <input type="number" id="auction-amount-input" step="0.1"
                             style="width:100%; text-align:left; padding-left:12px;" placeholder="Enter amount...">
