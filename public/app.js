@@ -22,28 +22,60 @@ let refreshCountdown = 20;
 
 const AUTH_HEADERS = () => ({ 'Authorization': `Bearer ${TOKEN}` });
 
-const IMG_BASE = 'https://api.minecraftitems.xyz/api/item/';
-const IMG_FALLBACKS = [
-    'https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.20.4/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.20.4/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.19.4/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.19.4/assets/minecraft/textures/block/',
-    'https://assets.mcasset.cloud/1.18.2/assets/minecraft/textures/item/',
-    'https://assets.mcasset.cloud/1.18.2/assets/minecraft/textures/block/'
-];
+const IMG_BASE = 'https://assets.mcasset.cloud/26.2/assets/minecraft/textures/item/';
+
+// Items whose texture filename differs from their item ID
+const TEXTURE_OVERRIDES = {
+    'enchanted_golden_apple': 'golden_apple',
+    'crossbow': 'crossbow_standby',
+    'debug_stick': 'stick',
+    'clock': 'clock_00',
+    'compass': 'compass_00',
+    'recovery_compass': 'recovery_compass_00',
+    'shulker_box': 'block/shulker_box',
+    'piston': 'block/piston_side',
+    'observer': 'block/observer_front',
+};
+
+function resolveTextureName(material) {
+    const key = (material || '').toLowerCase();
+    const override = TEXTURE_OVERRIDES[key];
+    if (override) {
+        if (override.startsWith('block/')) return override;
+        return override;
+    }
+    return key;
+}
+
+function getItemIconUrl(material) {
+    const resolved = resolveTextureName(material);
+    if (resolved.startsWith('block/')) {
+        return `https://assets.mcasset.cloud/26.2/assets/minecraft/textures/${resolved}.png`;
+    }
+    return `${IMG_BASE}${resolved}.png`;
+}
 
 function handleItemIconError(img, material, hideOnFail = false) {
     let attempt = parseInt(img.dataset.fallback || '0');
-    if (attempt < IMG_FALLBACKS.length) {
-        img.src = `${IMG_FALLBACKS[attempt]}${material.toLowerCase()}.png`;
+    if (attempt < 1) {
+        img.src = `https://assets.mcasset.cloud/26.2/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 2) {
+        img.src = `https://assets.mcasset.cloud/26.1/assets/minecraft/textures/item/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 3) {
+        img.src = `https://assets.mcasset.cloud/26.1/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 4) {
+        img.src = `https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/item/${resolveTextureName(material)}.png`;
+        img.dataset.fallback = attempt + 1;
+    } else if (attempt < 5) {
+        img.src = `https://assets.mcasset.cloud/1.21.11/assets/minecraft/textures/block/${resolveTextureName(material)}.png`;
         img.dataset.fallback = attempt + 1;
     } else {
         if (hideOnFail) {
             img.style.display = 'none';
         } else {
-            // Replace only the img, not the parent (preserves modal layout)
             const fallback = document.createElement('div');
             fallback.innerHTML = ICONS.BOX.trim();
             img.replaceWith(fallback.firstElementChild || fallback);
@@ -78,7 +110,6 @@ document.addEventListener('DOMContentLoaded', () => {
     TOKEN = new URLSearchParams(window.location.search).get('token');
     API_BASE = `/api/${SERVER_ID}`;
 
-    // Security: Clear the token from the URL bar immediately so it doesn't leak (Referer etc)
     if (TOKEN && window.history.replaceState) {
         const url = new URL(window.location);
         url.searchParams.delete('token');
@@ -89,25 +120,15 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 // ── Tab Sleep Mode ───────────────────────────────────────────────
-// When the tab is hidden, kill all intervals and network activity.
-// When the user returns, reload the current page and restart the timer.
 
 document.addEventListener('visibilitychange', () => {
     const countdownText = document.getElementById('refresh-countdown');
 
     if (document.hidden) {
-        // Tab hidden — full sleep: kill all intervals
-        if (autoRefreshTimer) {
-            clearInterval(autoRefreshTimer);
-            autoRefreshTimer = null;
-        }
-        if (balanceRefreshTimer) {
-            clearInterval(balanceRefreshTimer);
-            balanceRefreshTimer = null;
-        }
+        if (autoRefreshTimer) { clearInterval(autoRefreshTimer); autoRefreshTimer = null; }
+        if (balanceRefreshTimer) { clearInterval(balanceRefreshTimer); balanceRefreshTimer = null; }
         if (countdownText) countdownText.innerHTML = ICONS.MOON;
     } else {
-        // Tab visible again — wake up: restart balance refresh + page data
         if (!balanceRefreshTimer) {
             balanceRefreshTimer = setInterval(async () => {
                 if (document.hidden || !TOKEN) return;
@@ -131,7 +152,6 @@ document.addEventListener('visibilitychange', () => {
 async function waitForSession() {
     const overlay = document.getElementById('loading-overlay');
     const overlayText = overlay.querySelector('p');
-
     const maxRetries = 30;
     const retryInterval = 2000;
 
@@ -160,20 +180,15 @@ async function waitForSession() {
 
 function onSessionReady(player) {
     PLAYER_UUID = player.uuid;
-    // Player info
     document.getElementById('player-name').textContent = player.name;
     document.getElementById('player-avatar').style.backgroundImage =
         `url(https://mc-heads.net/avatar/${player.uuid}/28)`;
 
-    // Balance
     const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
     document.getElementById('balance-amount').textContent =
         `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
 
-    // Setup navigation
     setupNavigation();
-
-    // Load initial page
     loadMarketPage();
 }
 
@@ -181,28 +196,20 @@ function onSessionReady(player) {
 
 function setupNavigation() {
     document.querySelectorAll('.nav-tab').forEach(tab => {
-        tab.addEventListener('click', () => {
-            const page = tab.dataset.page;
-            switchPage(page);
-        });
+        tab.addEventListener('click', () => switchPage(tab.dataset.page));
     });
 }
 
 function switchPage(page) {
     currentPage = page;
-
-    // Update tab styles
     document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
     document.querySelector(`.nav-tab[data-page="${page}"]`).classList.add('active');
 
-    // Cleanup stocks observer when leaving stocks page
     if (stocksObserver) { stocksObserver.disconnect(); stocksObserver = null; }
 
-    // Show/hide pages
     document.querySelectorAll('.page-content').forEach(p => p.classList.add('hidden'));
     document.getElementById(`page-${page}`).classList.remove('hidden');
 
-    // Load page data
     switch (page) {
         case 'market': loadMarketPage(); break;
         case 'auction': loadAuctionPage(); break;
@@ -210,23 +217,17 @@ function switchPage(page) {
         case 'stocks': loadStocksPage(); break;
     }
 
-    // Auto-refresh UI and logic
     const timerUI = document.getElementById('refresh-info');
     const countdownText = document.getElementById('refresh-countdown');
-
     if (autoRefreshTimer) clearInterval(autoRefreshTimer);
 
     if (['auction', 'orders', 'stocks'].includes(page)) {
         timerUI.classList.add('visible');
         refreshCountdown = 20;
         countdownText.textContent = refreshCountdown + 's';
-
         autoRefreshTimer = setInterval(() => {
             refreshCountdown--;
-            if (refreshCountdown <= 0) {
-                refreshCountdown = 20;
-                refreshCurrentPage();
-            }
+            if (refreshCountdown <= 0) { refreshCountdown = 20; refreshCurrentPage(); }
             countdownText.textContent = refreshCountdown + 's';
         }, 1000);
     } else {
@@ -234,18 +235,13 @@ function switchPage(page) {
     }
 }
 
-/** Silently refresh data on the current page without resetting scroll or UI state */
 async function refreshCurrentPage() {
     try {
-        // Always refresh player data for the balance header
         const player = await api('/player');
-    if (!player) return;
-        if (!player) throw new Error('Session expired');
-        if (player) {
-            const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
-            const balEl = document.getElementById('balance-amount');
-            if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
-        }
+        if (!player) return;
+        const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+        const balEl = document.getElementById('balance-amount');
+        if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
 
         switch (currentPage) {
             case 'stocks': {
@@ -260,33 +256,42 @@ async function refreshCurrentPage() {
             }
             case 'auction': {
                 const auctions = await api('/auctions');
-                renderAuctions(auctions);
-      const auctions = await api('/auctions');
-      if (!auctions) break;
+                if (!auctions) break;
+                auctionData = auctions;
+                // Re-render category counts
+                const cats = await api('/categories');
+                if (cats) renderAuctionCategories(cats);
+                // Re-apply current filter
+                if (currentAuctionCategory) {
+                    let filtered;
+                    if (currentAuctionCategory === '__all') filtered = auctions;
+                    else if (currentAuctionCategory === '__bin') filtered = auctions.filter(a => a.isBin);
+                    else if (currentAuctionCategory === '__bid') filtered = auctions.filter(a => !a.isBin);
+                    else filtered = auctions.filter(a => a.categoryId === currentAuctionCategory || a.category === '');
+                    renderAuctions(filtered.length > 0 ? filtered : auctions);
+                } else {
+                    renderAuctions(auctions);
+                }
+                break;
             }
             case 'orders': {
                 const orders = await api('/orders');
+                if (!orders) break;
                 renderOrders(orders);
                 break;
-      const orders = await api('/orders');
-      if (!orders) break;
+            }
         }
-    } catch (e) {
-        // Silently fail — next interval will retry
-    }
+    } catch (e) {}
 }
 
-// Player Balance Refresh (Every 30 seconds as fallback)
 let balanceRefreshTimer = setInterval(async () => {
     if (document.hidden || !TOKEN) return;
     try {
         const player = await api('/player');
-        if (!player) throw new Error('Session expired');
-        if (player) {
-            const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
-            const balEl = document.getElementById('balance-amount');
-            if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
-        }
+        if (!player) return;
+        const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
+        const balEl = document.getElementById('balance-amount');
+        if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
     } catch (e) {}
 }, 30000);
 
@@ -297,16 +302,12 @@ let balanceRefreshTimer = setInterval(async () => {
 async function loadMarketPage() {
     try {
         const cats = await api('/categories');
-    const cats = await api('/categories');
-    if (!cats) return;
-        if (cats.length > 0) {
-            selectCategory(cats[0].id, cats[0].name);
-        }
+        if (!cats) return;
+        if (cats.length > 0) selectCategory(cats[0].id, cats[0].name);
     } catch (e) {
         console.error('Failed to load market:', e);
     }
 
-    // Search
     const searchInput = document.getElementById('search-input');
     searchInput.onkeyup = debounce(async () => {
         const q = searchInput.value.trim();
@@ -332,7 +333,7 @@ function renderCategories(cats) {
         el.className = 'sidebar-item';
         el.dataset.catId = cat.id;
         el.innerHTML = `
-            <img src="${IMG_BASE}${cat.icon?.toLowerCase() || 'stone'}" width="20" height="20"
+            <img src="${getItemIconUrl(cat.icon || 'stone')}" width="20" height="20"
                  style="image-rendering:pixelated" onerror="this.style.display='none'">
             <span>${esc(cat.name)}</span>
             <span class="item-count">${cat.itemCount}</span>
@@ -347,9 +348,6 @@ async function selectCategory(catId, catName) {
     currentPageNum = 0;
     document.getElementById('search-input').value = '';
 
-
-
-    // Active highlighting by category id
     document.querySelectorAll('.sidebar-item').forEach(s => {
         s.classList.toggle('active', s.dataset.catId === catId);
     });
@@ -388,7 +386,7 @@ function renderItems(items) {
         <div class="item-card" onclick="openBuyModal('${escJs(item.key)}','${escJs(item.name)}',${item.price},'${escJs(item.priceFormatted)}','${escJs(item.currency)}','${escJs(item.material)}')">
             <div class="item-card-header">
                 <div class="item-icon">
-                    <img src="${IMG_BASE}${item.material?.toLowerCase() || 'stone'}"
+                    <img src="${getItemIconUrl(item.material || 'stone')}"
                          onerror="handleItemIconError(this, '${escJs(item.material || 'stone')}')" alt="">
                 </div>
                 <div class="item-name">${esc(item.name)}</div>
@@ -404,7 +402,6 @@ function renderPagination(data, loadFn) {
     const div = document.getElementById('pagination');
     if (data.totalPages <= 1) { div.style.display = 'none'; return; }
     div.style.display = '';
-
     document.getElementById('page-info').textContent = `Page ${data.page + 1} / ${data.totalPages}`;
     const prev = document.getElementById('prev-page');
     const next = document.getElementById('next-page');
@@ -421,17 +418,22 @@ function updateBreadcrumb(name) {
 // ── Buy Modal ────────────────────────────────────────────────────
 
 let modalItem = {};
+let currentBuyContext = null;
 
-function openBuyModal(key, name, price, formatted, currency, material) {
+function openBuyModal(key, name, price, formatted, currency, material, maxQty = 64) {
     modalItem = { key, name, price, formatted, currency, material };
+    currentBuyContext = { maxQty };
     document.getElementById('modal-item-name').textContent = name;
     document.getElementById('modal-item-price').textContent = formatted;
     document.getElementById('modal-icon').innerHTML =
-        `<img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" width="36" height="36" style="image-rendering:pixelated"
+        `<img src="${getItemIconUrl(material || 'stone')}" width="36" height="36" style="image-rendering:pixelated"
               onerror="handleItemIconError(this, '${escJs(material || 'stone')}')">`;
     document.getElementById('amount-input').value = 1;
+    document.getElementById('amount-input').max = maxQty;
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', maxQty);
     document.getElementById('buy-modal').style.display = '';
+    document.getElementById('buy-modal').classList.remove('closing');
 }
 
 function updateModalTotal() {
@@ -442,22 +444,27 @@ function updateModalTotal() {
 }
 
 document.getElementById('modal-close')?.addEventListener('click', () => {
-    document.getElementById('buy-modal').style.display = 'none';
+    closeModal('buy-modal');
 });
 document.getElementById('modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('buy-modal').style.display = 'none';
+    closeModal('buy-modal');
 });
 document.getElementById('amount-minus')?.addEventListener('click', () => {
     const inp = document.getElementById('amount-input');
     inp.value = Math.max(1, (parseInt(inp.value) || 1) - 1);
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
 });
 document.getElementById('amount-plus')?.addEventListener('click', () => {
     const inp = document.getElementById('amount-input');
-    inp.value = Math.min(64, (parseInt(inp.value) || 1) + 1);
+    inp.value = Math.min(currentBuyContext?.maxQty || 64, (parseInt(inp.value) || 1) + 1);
     updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
 });
-document.getElementById('amount-input')?.addEventListener('input', updateModalTotal);
+document.getElementById('amount-input')?.addEventListener('input', () => {
+    updateModalTotal();
+    updateQtyButtonStates('amount-input', 'amount-minus', 'amount-plus', currentBuyContext?.maxQty || 64);
+});
 
 document.getElementById('modal-buy')?.addEventListener('click', async () => {
     const btn = document.getElementById('modal-buy');
@@ -472,11 +479,9 @@ document.getElementById('modal-buy')?.addEventListener('click', async () => {
             body: JSON.stringify({ item: modalItem.key, amount })
         });
         const result = await resp.json();
-
         if (result.success) {
             showToast('success', `Purchased ${amount}x ${modalItem.name}!`);
             document.getElementById('buy-modal').style.display = 'none';
-            // Poll for result
             pollPurchase(result.purchaseId);
         } else {
             showToast('error', result.error || 'Purchase failed');
@@ -509,7 +514,6 @@ async function pollPurchase(purchaseId) {
             }
         } catch (_) { /* retry */ }
     }
-    // Timed out after 30s — purchase may still complete server-side
     showToast('warn', 'Purchase taking longer than expected. Check in-game.');
 }
 
@@ -518,17 +522,30 @@ async function pollPurchase(purchaseId) {
 // ═══════════════════════════════════════════════════════════════════
 
 let auctionData = [];
+let currentAuctionCategory = null;
 
 async function loadAuctionPage() {
     try {
-        auctionData = await api('/auctions');
-        renderAuctions(auctionData);
+        const [auctions, cats] = await Promise.all([
+            api('/auctions'),
+            api('/categories')
+        ]);
+        if (!auctions) return;
+        auctionData = auctions;
+        if (cats && cats.length > 0) {
+            renderAuctionCategories(cats);
+            selectAuctionCategory('__all', 'All Listings');
+        } else {
+            renderAuctions(auctionData);
+        }
     } catch (e) {
         console.error('Failed to load auctions:', e);
     }
 
     document.getElementById('auction-search').onkeyup = debounce(() => {
         const q = document.getElementById('auction-search').value.toLowerCase();
+        currentAuctionCategory = null;
+        document.querySelectorAll('#auction-sidebar-categories .sidebar-item').forEach(s => s.classList.remove('active'));
         const filtered = auctionData.filter(a =>
             a.itemName.toLowerCase().includes(q) || a.seller.toLowerCase().includes(q)
         );
@@ -536,22 +553,102 @@ async function loadAuctionPage() {
     }, 200);
 }
 
-function renderAuctions(auctions) {
+function renderAuctionCategories(cats) {
+    const container = document.getElementById('auction-sidebar-categories');
+    if (!container) return;
+    container.innerHTML = '';
+
+    // Special auction-type filters
+    const specialFilters = [
+        { id: '__all', name: 'All Listings', icon: null, count: auctionData.length },
+        { id: '__bin', name: 'BIN Listings', icon: null, count: auctionData.filter(a => a.isBin).length },
+        { id: '__bid', name: 'BID Listings', icon: null, count: auctionData.filter(a => !a.isBin).length },
+    ];
+
+    specialFilters.forEach(f => {
+        const el = document.createElement('div');
+        el.className = 'sidebar-item';
+        el.dataset.catId = f.id;
+        el.dataset.special = 'true';
+        el.innerHTML = `
+            <span style="font-weight:600;color:var(--text-primary)">${esc(f.name)}</span>
+            <span class="item-count">${f.count}</span>
+        `;
+        el.addEventListener('click', () => selectAuctionCategory(f.id, f.name));
+        container.appendChild(el);
+    });
+
+    // Separator
+    const sep = document.createElement('div');
+    sep.className = 'sidebar-separator';
+    container.appendChild(sep);
+
+    // Item categories
+    cats.forEach(cat => {
+        const el = document.createElement('div');
+        el.className = 'sidebar-item';
+        el.dataset.catId = cat.id;
+        el.innerHTML = `
+            <img src="${getItemIconUrl(cat.icon || 'stone')}" width="20" height="20"
+                 style="image-rendering:pixelated" onerror="this.style.display='none'">
+            <span>${esc(cat.name)}</span>
+            <span class="item-count">${cat.itemCount}</span>
+        `;
+        el.addEventListener('click', () => selectAuctionCategory(cat.id, cat.name));
+        container.appendChild(el);
+    });
+}
+
+function selectAuctionCategory(catId, catName) {
+    currentAuctionCategory = catId;
+    document.getElementById('auction-search').value = '';
+
+    document.querySelectorAll('#auction-sidebar-categories .sidebar-item').forEach(s => {
+        s.classList.toggle('active', s.dataset.catId === catId);
+    });
+
+    let filtered;
+    if (catId === '__all') {
+        filtered = auctionData;
+    } else if (catId === '__bin') {
+        filtered = auctionData.filter(a => a.isBin);
+    } else if (catId === '__bid') {
+        filtered = auctionData.filter(a => !a.isBin);
+    } else {
+        filtered = auctionData.filter(a => a.categoryId === catId || a.category === catName);
+    }
+    renderAuctions(filtered, catName);
+}
+
+function renderAuctions(auctions, categoryName) {
     const grid = document.getElementById('auction-grid');
     const empty = document.getElementById('auction-empty');
+    const emptyTitle = document.getElementById('auction-empty-title');
+    const emptySub = document.getElementById('auction-empty-sub');
 
     if (!auctions || auctions.length === 0) {
         grid.innerHTML = '';
+        if (categoryName) {
+            emptyTitle.textContent = `No auctions in ${categoryName}`;
+            emptySub.textContent = 'No items are currently listed in this category. Check back later!';
+        } else {
+            emptyTitle.textContent = 'No active auctions';
+            emptySub.textContent = 'Check back later or list items in-game.';
+        }
         empty.style.display = '';
+        empty.classList.remove('fade-in');
+        void empty.offsetWidth;
+        empty.classList.add('fade-in');
         return;
     }
     empty.style.display = 'none';
+    empty.classList.remove('fade-in');
 
     grid.innerHTML = auctions.map(a => {
         const now = Date.now();
         const remaining = a.expiration - now;
         const timeStr = remaining > 0 ? formatDuration(remaining) : 'Expired';
-        const isExpiring = remaining > 0 && remaining < 300_000; // < 5min
+        const isExpiring = remaining > 0 && remaining < 300_000;
         const isOwner = a.sellerUuid === PLAYER_UUID;
 
         return `
@@ -559,7 +656,7 @@ function renderAuctions(auctions) {
             <div class="auction-tag ${a.isBin ? 'bin' : 'bid'}">${a.isBin ? 'BIN' : 'BID'}</div>
             <div class="auction-card-header">
                 <div class="auction-item-icon">
-                    <img src="${IMG_BASE}${a.material?.toLowerCase() || 'stone'}"
+                    <img src="${getItemIconUrl(a.material || 'stone')}"
                          onerror="handleItemIconError(this, '${escJs(a.material || 'stone')}')" alt="">
                 </div>
                 <div class="auction-item-info">
@@ -612,8 +709,11 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
     document.getElementById('auction-modal-item-name').textContent = name;
     document.getElementById('auction-modal-item-price').textContent = isBin ? `Price: ${currencyStr}${price.toLocaleString()}` : `Current: ${currencyStr}${price.toLocaleString()}`;
 
+    // Update label: BIN shows "Price (per item)", BID shows "Your Bid (per item)"
+    document.getElementById('auction-amount-label').textContent = isBin ? 'Price (per item)' : 'Your Bid (per item)';
+
     const iconEl = document.getElementById('auction-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
+    iconEl.innerHTML = `<img src="${getItemIconUrl(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('auction-amount-input');
     if (isBin) {
@@ -621,20 +721,21 @@ function openAuctionModal(id, isBin, name, material, price, currencyStr) {
         input.disabled = true;
         document.getElementById('auction-modal-btn-text').textContent = 'Confirm Purchase';
     } else {
-        input.value = price + 1; // Default next bid
+        input.value = price + 1;
         input.min = price + 0.1;
         input.disabled = false;
         document.getElementById('auction-modal-btn-text').textContent = 'Confirm Bid';
     }
 
     document.getElementById('auction-modal').style.display = 'flex';
+    document.getElementById('auction-modal').classList.remove('closing');
 }
 
 document.getElementById('auction-modal-close')?.addEventListener('click', () => {
-    document.getElementById('auction-modal').style.display = 'none';
+    closeModal('auction-modal');
 });
 document.getElementById('auction-modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('auction-modal').style.display = 'none';
+    closeModal('auction-modal');
 });
 
 document.getElementById('auction-modal-submit')?.addEventListener('click', async () => {
@@ -664,7 +765,7 @@ document.getElementById('auction-modal-submit')?.addEventListener('click', async
 
         if (result.success) {
             showToast('success', currentAuctionContext.isBin ? 'Purchase queued...' : 'Bid placed... waiting for server confirmation.');
-            document.getElementById('auction-modal').style.display = 'none';
+            closeModal('auction-modal');
             pollPurchase(result.purchaseId);
         } else {
             showToast('error', result.error || 'Request failed');
@@ -706,8 +807,6 @@ function renderOrders(orders) {
     body.innerHTML = orders.map(o => {
         const pct = o.amountRequested > 0
             ? Math.round((o.amountFilled / o.amountRequested) * 100) : 0;
-        const statusClass = o.status === 'ACTIVE' ? 'active' :
-            o.status === 'FILLED' ? 'filled' : 'cancelled';
         const remaining = o.amountRequested - o.amountFilled;
         const isOwner = o.buyerUuid === PLAYER_UUID;
 
@@ -715,7 +814,7 @@ function renderOrders(orders) {
         <tr>
             <td>
                 <div class="order-item-cell">
-                    <img class="order-item-icon" src="${IMG_BASE}${o.material?.toLowerCase() || 'stone'}"
+                    <img class="order-item-icon" src="${getItemIconUrl(o.material || 'stone')}"
                          loading="lazy" onerror="handleItemIconError(this, '${escJs(o.material || 'stone')}', true)" alt="">
                     <span class="order-item-name">${esc(o.itemName)}</span>
                 </div>
@@ -751,14 +850,13 @@ function openOrderFillModal(id, name, material, price, currencyStr, maxAmount) {
     document.getElementById('order-fill-modal-item-price').textContent = `Payout: ${currencyStr}${price.toLocaleString()} each`;
 
     const iconEl = document.getElementById('order-fill-modal-icon');
-    iconEl.innerHTML = `<img src="${IMG_BASE}${escJs(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
+    iconEl.innerHTML = `<img src="${getItemIconUrl(material)}" onerror="handleItemIconError(this, '${escJs(material)}', true)">`;
 
     const input = document.getElementById('order-fill-amount-input');
     input.value = 1;
     input.max = Math.min(64, maxAmount);
 
     updateOrderFillTotal();
-
     document.getElementById('order-fill-modal').style.display = 'flex';
 }
 
@@ -767,7 +865,6 @@ function updateOrderFillTotal() {
     let amount = parseInt(document.getElementById('order-fill-amount-input').value) || 1;
     amount = Math.min(amount, currentOrderContext.maxAmount, 64);
     amount = Math.max(1, amount);
-
     const total = currentOrderContext.price * amount;
     document.getElementById('order-fill-modal-total').textContent = `${currentOrderContext.currency}${total.toLocaleString()}`;
 }
@@ -776,20 +873,25 @@ document.getElementById('order-fill-amount-minus')?.addEventListener('click', ()
     const inp = document.getElementById('order-fill-amount-input');
     inp.value = Math.max(1, (parseInt(inp.value) || 1) - 1);
     updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
 });
 document.getElementById('order-fill-amount-plus')?.addEventListener('click', () => {
     if (!currentOrderContext) return;
     const inp = document.getElementById('order-fill-amount-input');
     inp.value = Math.min(currentOrderContext.maxAmount, 64, (parseInt(inp.value) || 1) + 1);
     updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
 });
-document.getElementById('order-fill-amount-input')?.addEventListener('input', updateOrderFillTotal);
+document.getElementById('order-fill-amount-input')?.addEventListener('input', () => {
+    updateOrderFillTotal();
+    updateQtyButtonStates('order-fill-amount-input', 'order-fill-amount-minus', 'order-fill-amount-plus', currentOrderContext?.maxAmount || 64);
+});
 
 document.getElementById('order-fill-modal-close')?.addEventListener('click', () => {
-    document.getElementById('order-fill-modal').style.display = 'none';
+    closeModal('order-fill-modal');
 });
 document.getElementById('order-fill-modal-cancel')?.addEventListener('click', () => {
-    document.getElementById('order-fill-modal').style.display = 'none';
+    closeModal('order-fill-modal');
 });
 
 document.getElementById('order-fill-modal-submit')?.addEventListener('click', async () => {
@@ -819,7 +921,7 @@ document.getElementById('order-fill-modal-submit')?.addEventListener('click', as
 
         if (result.success) {
             showToast('success', 'Fulfillment queued... checking your inventory in-game.');
-            document.getElementById('order-fill-modal').style.display = 'none';
+            closeModal('order-fill-modal');
             pollPurchase(result.purchaseId);
         } else {
             showToast('error', result.error || 'Request failed');
@@ -842,11 +944,8 @@ let stocksObserver = null;
 
 async function loadStocksPage() {
     try {
-        const [stocks, history] = await Promise.all([
-            api('/stocks'),
-            api('/price-history')
-        ]);
-    if (!stocks) return;
+        const [stocks, history] = await Promise.all([api('/stocks'), api('/price-history')]);
+        if (!stocks) return;
         stocksData = stocks;
         priceHistory = history || {};
         renderStocks(stocksData);
@@ -854,7 +953,6 @@ async function loadStocksPage() {
         console.error('Failed to load stocks:', e);
     }
 
-    // Search filter
     document.getElementById('stocks-search').onkeyup = debounce(() => {
         stocksRenderCount = 50;
         const q = document.getElementById('stocks-search').value.toLowerCase();
@@ -863,7 +961,6 @@ async function loadStocksPage() {
         renderStocksBody(filtered);
     }, 200);
 
-    // Sort control
     document.getElementById('stocks-sort').onchange = () => {
         stocksRenderCount = 50;
         const q = document.getElementById('stocks-search').value.toLowerCase();
@@ -874,11 +971,12 @@ async function loadStocksPage() {
 }
 
 function getSortedStocks() {
-    const sortBy = document.getElementById('stocks-sort').value;
+    const sortBy = currentStocksSort;
     const copy = [...stocksData];
     switch (sortBy) {
         case 'name': copy.sort((a, b) => a.name.localeCompare(b.name)); break;
         case 'buyPrice': copy.sort((a, b) => b.buyPrice - a.buyPrice); break;
+        case 'sellPrice': copy.sort((a, b) => b.sellPrice - a.sellPrice); break;
         case 'change': copy.sort((a, b) => Math.abs(b.change) - Math.abs(a.change)); break;
     }
     return copy;
@@ -896,11 +994,8 @@ function renderStocksBody(stocks, isAppend = false) {
         return;
     }
 
-    if (stocksObserver) {
-        stocksObserver.disconnect();
-    }
+    if (stocksObserver) stocksObserver.disconnect();
 
-    // Determine slice range
     const start = isAppend ? stocksRenderCount - 50 : 0;
     const end = stocksRenderCount;
     const toRender = stocks.slice(start, end);
@@ -914,7 +1009,7 @@ function renderStocksBody(stocks, isAppend = false) {
         <tr onclick="openStockChart('${escJs(s.key)}','${escJs(s.name)}','${escJs(s.material)}',${s.buyPrice},${s.sellPrice},${s.change},'${escJs(s.currencySymbol)}')">
             <td>
                 <div class="stock-item-cell">
-                    <img class="stock-item-icon" src="${IMG_BASE}${s.material?.toLowerCase() || 'stone'}"
+                    <img class="stock-item-icon" src="${getItemIconUrl(s.material || 'stone')}"
                          loading="lazy" onerror="handleItemIconError(this, '${escJs(s.material || 'stone')}', true)" alt="">
                     <span>${esc(s.name)}</span>
                 </div>
@@ -926,7 +1021,6 @@ function renderStocksBody(stocks, isAppend = false) {
     }).join('');
 
     if (isAppend) {
-        // Remove the existing "Loading more..." row before appending
         body.querySelector('.stocks-loader-row')?.remove();
         body.insertAdjacentHTML('beforeend', html);
     } else {
@@ -952,7 +1046,6 @@ function renderStocksBody(stocks, isAppend = false) {
 // ── Stock Chart Modal ────────────────────────────────────────────
 
 function openStockChart(key, name, material, buyPrice, sellPrice, change, currency) {
-    // Remove existing modal
     document.querySelector('.chart-modal-overlay')?.remove();
 
     const changeClass = change > 0 ? 'change-up' : change < 0 ? 'change-down' : '';
@@ -964,7 +1057,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
         <div class="chart-modal">
             <div class="chart-modal-header">
                 <h3>
-                    <img src="${IMG_BASE}${material?.toLowerCase() || 'stone'}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
+                    <img src="${getItemIconUrl(material || 'stone')}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
                     ${name}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
@@ -996,17 +1089,14 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
             </div>
         </div>
     `;
-    overlay.addEventListener('click', (e) => {
-        if (e.target === overlay) overlay.remove();
-    });
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
     document.body.appendChild(overlay);
 
-    // Draw the chart
     const history = priceHistory[key] || [];
     setTimeout(() => drawChart(history, change >= 0), 50);
 }
 
-// ── Canvas Chart Drawing (Modrinth-inspired) ─────────────────────
+// ── Canvas Chart Drawing ─────────────────────────────────────────
 
 function drawChart(data, isPositive) {
     const canvas = document.getElementById('stock-chart-canvas');
@@ -1024,10 +1114,7 @@ function drawChart(data, isPositive) {
     const ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
 
-    const padLeft = 60;
-    const padRight = 20;
-    const padTop = 20;
-    const padBottom = 40;
+    const padLeft = 60, padRight = 20, padTop = 20, padBottom = 40;
     const chartW = w - padLeft - padRight;
     const chartH = h - padTop - padBottom;
 
@@ -1035,7 +1122,6 @@ function drawChart(data, isPositive) {
     const gradientTop = isPositive ? 'rgba(27, 217, 106, 0.25)' : 'rgba(239, 68, 68, 0.25)';
     const gradientBot = isPositive ? 'rgba(27, 217, 106, 0.0)' : 'rgba(239, 68, 68, 0.0)';
 
-    // If no data, show message
     if (!data || data.length < 2) {
         ctx.fillStyle = '#6c6c80';
         ctx.font = '14px Inter, sans-serif';
@@ -1044,7 +1130,6 @@ function drawChart(data, isPositive) {
         return;
     }
 
-    // Extract values
     const prices = data.map(d => d.b);
     const times = data.map(d => d.t);
     const minPrice = Math.min(...prices) * 0.95;
@@ -1054,15 +1139,12 @@ function drawChart(data, isPositive) {
     const maxTime = times[times.length - 1];
     const timeRange = maxTime - minTime || 1;
 
-    // Scale functions
     const xScale = (t) => padLeft + ((t - minTime) / timeRange) * chartW;
     const yScale = (p) => padTop + chartH - ((p - minPrice) / priceRange) * chartH;
 
-    // ── Grid lines ───────────────────────────────────────────
     ctx.strokeStyle = '#2d2e36';
     ctx.lineWidth = 1;
 
-    // Y-axis grid + labels
     const yTicks = 5;
     ctx.fillStyle = '#6c6c80';
     ctx.font = '11px Inter, sans-serif';
@@ -1070,31 +1152,22 @@ function drawChart(data, isPositive) {
     for (let i = 0; i <= yTicks; i++) {
         const val = minPrice + (priceRange * i / yTicks);
         const y = yScale(val);
-        ctx.beginPath();
-        ctx.moveTo(padLeft, y);
-        ctx.lineTo(w - padRight, y);
-        ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(padLeft, y); ctx.lineTo(w - padRight, y); ctx.stroke();
         ctx.fillText(val.toFixed(val >= 100 ? 0 : 1), padLeft - 8, y + 4);
     }
 
-    // X-axis labels
-    // X-axis labels (with auto-thinning)
     ctx.textAlign = 'center';
     let lastLabelX = -100;
     for (let i = 0; i < data.length; i++) {
         const t = times[i];
         const x = xScale(t);
-        
-        // Ensure at least 70px spacing between labels to prevent overlap
         if (x - lastLabelX < 70 && i !== data.length - 1) continue;
-
         const date = new Date(t);
         const label = `${date.getDate()} ${date.toLocaleString('en', { month: 'short' })}`;
         ctx.fillText(label, x, h - 10);
         lastLabelX = x;
     }
 
-    // ── Gradient fill ────────────────────────────────────────
     const gradient = ctx.createLinearGradient(0, padTop, 0, padTop + chartH);
     gradient.addColorStop(0, gradientTop);
     gradient.addColorStop(1, gradientBot);
@@ -1102,30 +1175,22 @@ function drawChart(data, isPositive) {
     ctx.beginPath();
     ctx.moveTo(xScale(times[0]), yScale(prices[0]));
     for (let i = 1; i < data.length; i++) {
-        const x = xScale(times[i]);
-        const y = yScale(prices[i]);
-
-        // Smooth bezier curve
-        const prevX = xScale(times[i - 1]);
-        const prevY = yScale(prices[i - 1]);
+        const x = xScale(times[i]), y = yScale(prices[i]);
+        const prevX = xScale(times[i - 1]), prevY = yScale(prices[i - 1]);
         const cpx = (prevX + x) / 2;
         ctx.bezierCurveTo(cpx, prevY, cpx, y, x, y);
     }
-    // Close to bottom for fill
     ctx.lineTo(xScale(times[times.length - 1]), padTop + chartH);
     ctx.lineTo(xScale(times[0]), padTop + chartH);
     ctx.closePath();
     ctx.fillStyle = gradient;
     ctx.fill();
 
-    // ── Line ─────────────────────────────────────────────────
     ctx.beginPath();
     ctx.moveTo(xScale(times[0]), yScale(prices[0]));
     for (let i = 1; i < data.length; i++) {
-        const x = xScale(times[i]);
-        const y = yScale(prices[i]);
-        const prevX = xScale(times[i - 1]);
-        const prevY = yScale(prices[i - 1]);
+        const x = xScale(times[i]), y = yScale(prices[i]);
+        const prevX = xScale(times[i - 1]), prevY = yScale(prices[i - 1]);
         const cpx = (prevX + x) / 2;
         ctx.bezierCurveTo(cpx, prevY, cpx, y, x, y);
     }
@@ -1133,67 +1198,40 @@ function drawChart(data, isPositive) {
     ctx.lineWidth = 2.5;
     ctx.stroke();
 
-    // ── End dot ──────────────────────────────────────────────
     const lastX = xScale(times[times.length - 1]);
     const lastY = yScale(prices[prices.length - 1]);
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 5, 0, Math.PI * 2);
-    ctx.fillStyle = lineColor;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(lastX, lastY, 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#fff';
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(lastX, lastY, 5, 0, Math.PI * 2); ctx.fillStyle = lineColor; ctx.fill();
+    ctx.beginPath(); ctx.arc(lastX, lastY, 3, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill();
 
-    // ── Hover tooltip ────────────────────────────────────────
     const tooltip = document.getElementById('chart-tooltip');
     canvas.onmousemove = (e) => {
         const rect = canvas.getBoundingClientRect();
         const mx = e.clientX - rect.left;
         const my = e.clientY - rect.top;
+        if (mx < padLeft || mx > w - padRight) { tooltip.classList.remove('visible'); return; }
 
-        if (mx < padLeft || mx > w - padRight) {
-            tooltip.classList.remove('visible');
-            return;
-        }
-
-        // Find nearest data point
-        let closest = 0;
-        let closestDist = Infinity;
+        let closest = 0, closestDist = Infinity;
         for (let i = 0; i < data.length; i++) {
             const dx = Math.abs(xScale(times[i]) - mx);
-            if (dx < closestDist) {
-                closestDist = dx;
-                closest = i;
-            }
+            if (dx < closestDist) { closestDist = dx; closest = i; }
         }
 
         const d = data[closest];
-        const px = xScale(d.t);
-        const py = yScale(d.b);
+        const px = xScale(d.t), py = yScale(d.b);
         const date = new Date(d.t);
         const dateStr = date.toLocaleDateString('en', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
         tooltip.querySelector('.chart-tooltip-date').textContent = dateStr;
         tooltip.querySelector('.chart-tooltip-value').textContent = `Buy: ${d.b.toLocaleString(undefined, { maximumFractionDigits: 2 })}  Sell: ${d.s.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 
-        // Position tooltip
-        let tx = px + 12;
-        let ty = py - 40;
+        let tx = px + 12, ty = py - 40;
         if (tx + 180 > w) tx = px - 190;
         if (ty < 0) ty = py + 10;
         tooltip.style.left = tx + 'px';
         tooltip.style.top = ty + 'px';
         tooltip.classList.add('visible');
-
-        // Draw crosshair
-        drawChart.__redraw = () => {
-            // We won't redraw, just draw over with crosshair
-        };
     };
-    canvas.onmouseleave = () => {
-        tooltip.classList.remove('visible');
-    };
+    canvas.onmouseleave = () => { tooltip.classList.remove('visible'); };
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1221,15 +1259,14 @@ function showToast(type, msg) {
 
 function esc(str) {
     return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
+        .replace(/&/g, '&')
+       &amp;.replace(/</g, '<')
+    &lt;   .replace(/>/g, '>')
+ &gt;      .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;')
         .replace(/`/g, '&#96;');
 }
 
-/** Escape for use inside JS string literals (onclick handlers) */
 function escJs(str) {
     return String(str)
         .replace(/\\/g, '\\\\')
@@ -1242,8 +1279,81 @@ function escJs(str) {
 
 function debounce(fn, ms) {
     let timer;
-    return (...args) => {
-        clearTimeout(timer);
-        timer = setTimeout(() => fn(...args), ms);
-    };
+    return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+}
+
+// ── Modal Close Animation ────────────────────────────────────────
+function closeModal(overlayId) {
+    const overlay = document.getElementById(overlayId);
+    if (!overlay) return;
+    overlay.classList.add('closing');
+    overlay.addEventListener('animationend', () => {
+        overlay.style.display = 'none';
+        overlay.classList.remove('closing');
+    }, { once: true });
+}
+
+// ── Update +/- button disabled states ──────────────────────────
+function updateQtyButtonStates(inputId, minusId, plusId, maxQty) {
+    const val = parseInt(document.getElementById(inputId)?.value) || 1;
+    const minusBtn = document.getElementById(minusId);
+    const plusBtn = document.getElementById(plusId);
+    if (minusBtn) {
+        if (val <= 1) minusBtn.classList.add('at-limit');
+        else minusBtn.classList.remove('at-limit');
+    }
+    if (plusBtn) {
+        if (val >= maxQty) plusBtn.classList.add('at-limit');
+        else plusBtn.classList.remove('at-limit');
+    }
+}
+
+// ── Custom Select Dropdown ──────────────────────────────────────
+let currentStocksSort = 'name';
+
+function initCustomSelects() {
+    document.querySelectorAll('.custom-select').forEach(sel => {
+        const trigger = sel.querySelector('.custom-select-trigger');
+        const options = sel.querySelector('.custom-select-options');
+        const valueSpan = sel.querySelector('.custom-select-value');
+        if (!trigger || !options) return;
+
+        trigger.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = trigger.getAttribute('aria-expanded') === 'true';
+            closeAllCustomSelects();
+            if (!isOpen) {
+                trigger.setAttribute('aria-expanded', 'true');
+                options.classList.add('open');
+            }
+        });
+
+        options.querySelectorAll('li').forEach(li => {
+            li.addEventListener('click', () => {
+                const val = li.getAttribute('data-value');
+                const text = li.textContent;
+                valueSpan.textContent = text;
+                options.querySelectorAll('li').forEach(l => l.classList.remove('selected'));
+                li.classList.add('selected');
+                trigger.setAttribute('aria-expanded', 'false');
+                options.classList.remove('open');
+
+                currentStocksSort = val;
+                stocksRenderCount = 50;
+                const q = document.getElementById('stocks-search')?.value?.toLowerCase() || '';
+                const sorted = getSortedStocks();
+                const filtered = q ? sorted.filter(s => s.name.toLowerCase().includes(q)) : sorted;
+                renderStocksBody(filtered);
+            });
+        });
+    });
+
+    document.addEventListener('click', closeAllCustomSelects);
+}
+
+function closeAllCustomSelects() {
+    document.querySelectorAll('.custom-select-trigger[aria-expanded="true"]').forEach(t => {
+        t.setAttribute('aria-expanded', 'false');
+        t.nextElementSibling?.classList.remove('open');
+    });
 }
