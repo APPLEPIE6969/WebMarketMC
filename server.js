@@ -724,7 +724,7 @@ app.post('/api/confirm-purchase', requireApiKey, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════
 
 /** Middleware: validate session token for browser requests */
-function requireSession(req, res, next) {
+async function requireSession(req, res, next) {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
     if (!token) return res.status(401).json({ error: 'Missing token' });
 
