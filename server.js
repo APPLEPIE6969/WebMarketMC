@@ -463,7 +463,10 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({ limit: '1mb' }));
+
+// Allow large payloads only on /api/sync (market data can be big)
+app.use('/api/sync', express.json({ limit: '15mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
@@ -518,17 +521,25 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // API key changed (server restarted with new key) — accept the new key
-            console.log(`[Register] API key updated for ${serverId} (key rotation)`);
+            // API key mismatch — only allow rotation if REGISTRATION_SECRET is set and caller knows it
+            if (!regSecret) {
+                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
+                return res.status(403).json({ error: 'Server ID already registered with different API key' });
+            }
+            console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
             existing.apiKey = apiKey;
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
-                astraUpdate('servers', serverId, {
+                const updateResult = await astraUpdate('servers', serverId, {
                     api_key: encrypt(apiKey),
                     server_name: existing.serverName,
                     last_sync: existing.lastSync,
-                }).catch(e => console.error('[Astra] Failed to update API key:', e.message));
+                });
+                if (!updateResult.ok) {
+                    console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
+                    return res.status(500).json({ error: 'Failed to update server credentials' });
+                }
             }
             return res.json({ success: true, reRegistered: true });
         } else {
@@ -547,17 +558,25 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // API key changed — accept new key, restore to cache with updated key
-                console.log(`[Register] DB API key updated for ${serverId} (key rotation)`);
+                // API key mismatch — only allow rotation if REGISTRATION_SECRET is set and caller knows it
+                if (!regSecret) {
+                    console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
+                    return res.status(403).json({ error: 'Server ID already registered with different API key' });
+                }
+                console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
                 existing.apiKey = apiKey;
                 existing.serverName = serverName || existing.serverName;
                 existing.lastSync = Date.now();
                 serverCache.set(serverId, existing);
-                astraUpdate('servers', serverId, {
+                const updateResult = await astraUpdate('servers', serverId, {
                     api_key: encrypt(apiKey),
                     server_name: existing.serverName,
                     last_sync: existing.lastSync,
-                }).catch(e => console.error('[Astra] Failed to update API key:', e.message));
+                });
+                if (!updateResult.ok) {
+                    console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
+                    return res.status(500).json({ error: 'Failed to update server credentials' });
+                }
                 return res.json({ success: true, reRegistered: true });
             } else {
                 // Same key — restore to cache
