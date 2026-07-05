@@ -463,10 +463,8 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.set('trust proxy', 1);
-app.use(express.json({ limit: '15mb' }));
 
-// Rate limit: 330 requests per minute per IP
+// Rate limit: 330 requests per minute per IP (before body parser to avoid parsing large payloads)
 app.use('/api/', rateLimit({
     windowMs: 60_000,
     max: 330,
@@ -479,6 +477,12 @@ app.use('/api/', rateLimit({
         return s && s.apiKey === req.headers['x-api-key'];
     }
 }));
+
+// Trust proxy for Render (behind single proxy)
+app.set('trust proxy', 1);
+
+// Body parser with 15mb limit for large sync payloads
+app.use(express.json({ limit: '15mb' }));
 
 // ── Middleware: API Key Auth ─────────────────────────────────────
 function requireApiKey(req, res, next) {
@@ -519,10 +523,14 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // API key changed — accept the new key (server restarted with new key)
-            // The serverId is a UUID with 122 bits of entropy, so only the legitimate
-            // MC server knows it. This is safe without REGISTRATION_SECRET.
-            console.log(`[Register] API key updated for ${serverId} (key rotation)`);
+            // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
+            // and the caller proves knowledge of it. Without the secret, reject to
+            // prevent server takeover via public /shop/:serverId URL.
+            if (!regSecret) {
+                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
+                return res.status(403).json({ error: 'Server ID already registered with different API key' });
+            }
+            console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
             const oldApiKey = existing.apiKey;
             const oldServerName = existing.serverName;
             const oldLastSync = existing.lastSync;
@@ -561,9 +569,14 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // API key changed — accept new key (server restarted with new key)
-                // serverId is a UUID with 122 bits of entropy — only the legitimate MC server knows it.
-                console.log(`[Register] DB API key updated for ${serverId} (key rotation)`);
+                // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
+                // and the caller proves knowledge of it. Without the secret, reject to
+                // prevent server takeover via public /shop/:serverId URL.
+                if (!regSecret) {
+                    console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
+                    return res.status(403).json({ error: 'Server ID already registered with different API key' });
+                }
+                console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
                 const oldApiKey = existing.apiKey;
                 existing.apiKey = apiKey;
                 existing.serverName = serverName || existing.serverName;
