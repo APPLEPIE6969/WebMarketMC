@@ -523,6 +523,9 @@ app.post('/api/register', async (req, res) => {
             // The serverId is a UUID with 122 bits of entropy, so only the legitimate
             // MC server knows it. This is safe without REGISTRATION_SECRET.
             console.log(`[Register] API key updated for ${serverId} (key rotation)`);
+            const oldApiKey = existing.apiKey;
+            const oldServerName = existing.serverName;
+            const oldLastSync = existing.lastSync;
             existing.apiKey = apiKey;
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
@@ -533,6 +536,10 @@ app.post('/api/register', async (req, res) => {
                     last_sync: existing.lastSync,
                 });
                 if (!updateResult.ok) {
+                    // Rollback cache to pre-rotation state so a retry takes the mismatch path again
+                    existing.apiKey = oldApiKey;
+                    existing.serverName = oldServerName;
+                    existing.lastSync = oldLastSync;
                     console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
                     return res.status(500).json({ error: 'Failed to update server credentials' });
                 }
@@ -557,19 +564,21 @@ app.post('/api/register', async (req, res) => {
                 // API key changed — accept new key (server restarted with new key)
                 // serverId is a UUID with 122 bits of entropy — only the legitimate MC server knows it.
                 console.log(`[Register] DB API key updated for ${serverId} (key rotation)`);
+                const oldApiKey = existing.apiKey;
                 existing.apiKey = apiKey;
                 existing.serverName = serverName || existing.serverName;
                 existing.lastSync = Date.now();
-                serverCache.set(serverId, existing);
                 const updateResult = await astraUpdate('servers', serverId, {
                     api_key: encrypt(apiKey),
                     server_name: existing.serverName,
                     last_sync: existing.lastSync,
                 });
                 if (!updateResult.ok) {
+                    // Don't cache the new key — leave Astra as source of truth with old key
                     console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
                     return res.status(500).json({ error: 'Failed to update server credentials' });
                 }
+                serverCache.set(serverId, existing);
                 return res.json({ success: true, reRegistered: true });
             } else {
                 // Same key — restore to cache
