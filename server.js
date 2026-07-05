@@ -481,8 +481,8 @@ app.use('/api/', rateLimit({
 // Trust proxy for Render (behind single proxy)
 app.set('trust proxy', 1);
 
-// Body parser with 15mb limit for large sync payloads
-app.use(express.json({ limit: '15mb' }));
+// Body parser with 50mb limit for large sync payloads
+app.use(express.json({ limit: '50mb' }));
 
 // ── Middleware: API Key Auth ─────────────────────────────────────
 function requireApiKey(req, res, next) {
@@ -523,12 +523,17 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
-            // and the caller proves knowledge of it. Without the secret, reject to
-            // prevent server takeover via public /shop/:serverId URL.
-            if (!regSecret) {
-                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
-                return res.status(403).json({ error: 'Server ID already registered with different API key' });
+            // API key mismatch — allow rotation if caller proves knowledge of
+            // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
+            // This prevents takeover via public /shop/:serverId URL while allowing
+            // legitimate server restarts (which know their current key).
+            const currentKeyHeader = req.headers['x-current-api-key'];
+            const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
+            const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+            
+            if (!knowsCurrentKey && !hasRegSecret) {
+                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+                return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
             }
             console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
             const oldApiKey = existing.apiKey;
@@ -569,12 +574,15 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
-                // and the caller proves knowledge of it. Without the secret, reject to
-                // prevent server takeover via public /shop/:serverId URL.
-                if (!regSecret) {
-                    console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
-                    return res.status(403).json({ error: 'Server ID already registered with different API key' });
+                // API key mismatch — allow rotation if caller proves knowledge of
+                // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
+                const currentKeyHeader = req.headers['x-current-api-key'];
+                const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
+                const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+                
+                if (!knowsCurrentKey && !hasRegSecret) {
+                    console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+                    return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
                 }
                 console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
                 const oldApiKey = existing.apiKey;
