@@ -463,12 +463,8 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '1mb' }));
 
-// Allow large payloads only on /api/sync (market data can be big)
-app.use('/api/sync', express.json({ limit: '15mb' }));
-
-// Rate limit: 330 requests per minute per IP
+// Rate limit: 330 requests per minute per IP (before body parser to avoid parsing large payloads)
 app.use('/api/', rateLimit({
     windowMs: 60_000,
     max: 330,
@@ -481,6 +477,12 @@ app.use('/api/', rateLimit({
         return s && s.apiKey === req.headers['x-api-key'];
     }
 }));
+
+// Trust proxy for Render (behind single proxy)
+app.set('trust proxy', 1);
+
+// Body parser with 15mb limit for large sync payloads
+app.use(express.json({ limit: '15mb' }));
 
 // ── Middleware: API Key Auth ─────────────────────────────────────
 function requireApiKey(req, res, next) {
@@ -521,12 +523,17 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // API key mismatch — only allow rotation if REGISTRATION_SECRET is set and caller knows it
+            // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
+            // and the caller proves knowledge of it. Without the secret, reject to
+            // prevent server takeover via public /shop/:serverId URL.
             if (!regSecret) {
                 console.log(`[Register] API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
                 return res.status(403).json({ error: 'Server ID already registered with different API key' });
             }
             console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
+            const oldApiKey = existing.apiKey;
+            const oldServerName = existing.serverName;
+            const oldLastSync = existing.lastSync;
             existing.apiKey = apiKey;
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
@@ -537,6 +544,10 @@ app.post('/api/register', async (req, res) => {
                     last_sync: existing.lastSync,
                 });
                 if (!updateResult.ok) {
+                    // Rollback cache to pre-rotation state so a retry takes the mismatch path again
+                    existing.apiKey = oldApiKey;
+                    existing.serverName = oldServerName;
+                    existing.lastSync = oldLastSync;
                     console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
                     return res.status(500).json({ error: 'Failed to update server credentials' });
                 }
@@ -558,25 +569,29 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // API key mismatch — only allow rotation if REGISTRATION_SECRET is set and caller knows it
+                // API key mismatch — only allow rotation if REGISTRATION_SECRET is set
+                // and the caller proves knowledge of it. Without the secret, reject to
+                // prevent server takeover via public /shop/:serverId URL.
                 if (!regSecret) {
                     console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no REGISTRATION_SECRET to authorize rotation)`);
                     return res.status(403).json({ error: 'Server ID already registered with different API key' });
                 }
                 console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
+                const oldApiKey = existing.apiKey;
                 existing.apiKey = apiKey;
                 existing.serverName = serverName || existing.serverName;
                 existing.lastSync = Date.now();
-                serverCache.set(serverId, existing);
                 const updateResult = await astraUpdate('servers', serverId, {
                     api_key: encrypt(apiKey),
                     server_name: existing.serverName,
                     last_sync: existing.lastSync,
                 });
                 if (!updateResult.ok) {
+                    // Don't cache the new key — leave Astra as source of truth with old key
                     console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
                     return res.status(500).json({ error: 'Failed to update server credentials' });
                 }
+                serverCache.set(serverId, existing);
                 return res.json({ success: true, reRegistered: true });
             } else {
                 // Same key — restore to cache
