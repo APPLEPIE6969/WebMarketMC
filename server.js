@@ -463,7 +463,7 @@ function deserializePurchase(row) {
 // ── Security Middleware ──────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors({ origin: 'https://webaureliummc.onrender.com' }));
-app.use(express.json({ limit: '7mb' }));
+app.use(express.json({ limit: '15mb' }));
 
 // Rate limit: 330 requests per minute per IP
 app.use('/api/', rateLimit({
@@ -518,9 +518,15 @@ app.post('/api/register', async (req, res) => {
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
-            // API key mismatch — return 403, do NOT purge (security)
-            console.log(`[Register] API key mismatch for ${serverId} — rejecting`);
-            return res.status(403).json({ error: 'Server ID already registered with different API key' });
+            // API key changed (server restarted with new key) — accept the new key
+            console.log(`[Register] API key updated for ${serverId} (was ${existing.apiKey.slice(0,8)}... → ${apiKey.slice(0,8)}...)`);
+            existing.apiKey = apiKey;
+            existing.serverName = serverName || existing.serverName;
+            existing.lastSync = Date.now();
+            if (ASTRA_TOKEN) {
+                await astraUpdate('servers', serverId, { api_key: apiKey, server_name: existing.serverName, last_sync: existing.lastSync });
+            }
+            return res.json({ success: true, reRegistered: true });
         } else {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
@@ -537,9 +543,14 @@ app.post('/api/register', async (req, res) => {
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
             if (existing.apiKey !== apiKey) {
-                // API key mismatch — return 403, do NOT purge (security)
-                console.log(`[Register] DB API key mismatch for ${serverId} — rejecting`);
-                return res.status(403).json({ error: 'Server ID already registered with different API key' });
+                // API key changed — accept new key, restore to cache with updated key
+                console.log(`[Register] DB API key updated for ${serverId} (was ${existing.apiKey.slice(0,8)}... → ${apiKey.slice(0,8)}...)`);
+                existing.apiKey = apiKey;
+                existing.serverName = serverName || existing.serverName;
+                existing.lastSync = Date.now();
+                serverCache.set(serverId, existing);
+                await astraUpdate('servers', serverId, { api_key: apiKey, server_name: existing.serverName, last_sync: existing.lastSync });
+                return res.json({ success: true, reRegistered: true });
             } else {
                 // Same key — restore to cache
                 existing.lastSync = Date.now();
