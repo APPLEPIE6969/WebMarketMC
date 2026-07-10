@@ -224,9 +224,12 @@ async function astraFetch(table, method, pathSuffix, body) {
 // Get a single row by primary key
 async function astraGet(table, pk) {
     const result = await astraFetch(table, 'GET', pk);
+    // Preserve fetch errors (timeout, 500, network) so callers can
+    // distinguish outages from missing rows
+    if (!result.ok) return result;
     // Astra REST API returns 200 with { data: null } for non-existent PKs
     // instead of 404. Validate that data actually contains the row.
-    if (result.ok && result.data && result.data.data && result.data.data[Object.keys(result.data.data)[0]]) {
+    if (result.data && result.data.data && result.data.data[Object.keys(result.data.data)[0]]) {
         return result;
     }
     return { ok: false, error: 'not found', data: null };
