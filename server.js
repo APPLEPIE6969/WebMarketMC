@@ -223,7 +223,16 @@ async function astraFetch(table, method, pathSuffix, body) {
 
 // Get a single row by primary key
 async function astraGet(table, pk) {
-    return astraFetch(table, 'GET', pk);
+    const result = await astraFetch(table, 'GET', pk);
+    // Preserve fetch errors (timeout, 500, network) so callers can
+    // distinguish outages from missing rows
+    if (!result.ok) return result;
+    // Astra REST API returns 200 with { data: null } for non-existent PKs
+    // instead of 404. Validate that data actually contains the row.
+    if (result.data && result.data.data && result.data.data[Object.keys(result.data.data)[0]]) {
+        return result;
+    }
+    return { ok: false, error: 'not found', data: null };
 }
 
 // Insert a row
@@ -277,8 +286,8 @@ async function astraQuery(table, column, value) {
     }
 }
 
-// ── Pagination helper: fetch all pages ──────────────────────────
-async function loadAllPages(table, pageSize = 500) {
+// ── Pagination helper: fetch all pages (with max limit to prevent OOM) ──────────────────────────
+async function loadAllPages(table, pageSize = 500, maxRows = 1000) {
     if (!ASTRA_REST) return [];
     const all = [];
     let pageState = null;
@@ -301,6 +310,10 @@ async function loadAllPages(table, pageSize = 500) {
             try { data = JSON.parse(text); } catch {}
             if (!resp.ok || !data?.data) break;
             all.push(...data.data);
+            if (all.length >= maxRows) {
+                console.warn(`[Astra] loadAllPages ${table} → hit maxRows limit (${maxRows}), stopping`);
+                break;
+            }
             pageState = data.pageState || null;
         } catch (e) {
             clearTimeout(timeoutId);
@@ -322,15 +335,15 @@ async function loadCacheFromDB() {
 
     console.log('[Cache] Loading data from Astra DB...');
 
-    // Load servers (all pages)
-    const serverRows = await loadAllPages('servers');
+    // Load servers (all pages, max 1000 to prevent OOM)
+    const serverRows = await loadAllPages('servers', 500, 1000);
     for (const row of serverRows) {
         serverCache.set(row.server_id, deserializeServer(row));
     }
     console.log(`[Cache] Loaded ${serverCache.size} servers`);
 
-    // Load sessions (only non-expired)
-    const sessionRows = await loadAllPages('sessions', 500);
+    // Load sessions (only non-expired, max 2000)
+    const sessionRows = await loadAllPages('sessions', 500, 2000);
     const now = Date.now();
     let loadedSessions = 0;
     for (const row of sessionRows) {
@@ -343,8 +356,8 @@ async function loadCacheFromDB() {
     }
     console.log(`[Cache] Loaded ${loadedSessions} active sessions`);
 
-    // Load purchases (only pending, not stale)
-    const purchaseRows = await loadAllPages('purchases', 500);
+    // Load purchases (only pending, not stale, max 2000)
+    const purchaseRows = await loadAllPages('purchases', 500, 2000);
     const now2 = Date.now();
     let loadedPurchases = 0;
     for (const row of purchaseRows) {
