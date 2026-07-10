@@ -649,6 +649,25 @@ app.post('/api/register', async (req, res) => {
     res.json({ success: true });
 });
 
+/** DELETE /api/servers/:serverId — admin endpoint to clear a stuck server registration (requires REGISTRATION_SECRET) */
+app.delete('/api/servers/:serverId', async (req, res) => {
+    const regSecret = process.env.REGISTRATION_SECRET || '';
+    if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+        return res.status(403).json({ error: 'Invalid registration secret' });
+    }
+    const { serverId } = req.params;
+    serverCache.delete(serverId);
+    if (ASTRA_TOKEN) {
+        const delResult = await astraDelete('servers', serverId);
+        if (!delResult.ok) {
+            console.error(`[Admin] Failed to delete ${serverId} from Astra:`, delResult.error);
+            return res.status(500).json({ error: 'Failed to delete from DB' });
+        }
+    }
+    console.log(`[Admin] Deleted server ${serverId}`);
+    res.json({ success: true });
+});
+
 /** POST /api/sync — MC plugin pushes market data + auctions + orders + stocks */
 app.post('/api/sync', requireApiKey, async (req, res) => {
     const { categories, items, auctions, orders, stocks, priceHistory, customItems } = req.body;
