@@ -719,14 +719,12 @@ app.post('/api/sync', requireApiKey, async (req, res) => {
     server.lastSync = Date.now();
 
     // Persist to Astra (await for durability)
+    // Only persist lightweight data — auctions/orders/stocks/priceHistory are large
+    // and cause 413 errors. Plugin resends full data on every sync anyway.
     if (ASTRA_TOKEN) {
         await astraUpdate('servers', req.serverId, {
             categories_json: JSON.stringify(server.categories),
             items_json: JSON.stringify(server.items),
-            auctions_json: server.auctionsJson,
-            orders_json: server.ordersJson,
-            stocks_json: server.stocksJson,
-            price_history_json: server.priceHistoryJson,
             last_sync: server.lastSync,
         });
     }
