@@ -652,8 +652,11 @@ app.post('/api/register', async (req, res) => {
 
 /** DELETE /api/servers/:serverId — admin endpoint to clear a stuck server registration (requires REGISTRATION_SECRET) */
 app.delete('/api/servers/:serverId', async (req, res) => {
-    const regSecret = process.env.REGISTRATION_SECRET || '';
-    if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+    const regSecret = process.env.REGISTRATION_SECRET;
+    if (!regSecret) {
+        return res.status(403).json({ error: 'Admin endpoint disabled — REGISTRATION_SECRET not configured' });
+    }
+    if (req.headers['x-registration-secret'] !== regSecret) {
         return res.status(403).json({ error: 'Invalid registration secret' });
     }
     const { serverId } = req.params;
