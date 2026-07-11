@@ -523,16 +523,13 @@ function requireApiKey(req, res, next) {
 /** POST /api/register — MC plugin registers on startup */
 app.post('/api/register', async (req, res) => {
     const regSecret = process.env.REGISTRATION_SECRET || '';
-    if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
-        return res.status(403).json({ error: 'Invalid registration secret' });
-    }
     const { serverId, apiKey, serverName } = req.body;
 
     if (!serverId || !apiKey) {
         return res.status(400).json({ error: 'Missing serverId or apiKey' });
     }
 
-    // If server already exists in cache, validate the key
+    // Check if server already exists in cache
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
         if (existing.apiKey !== apiKey) {
@@ -543,7 +540,7 @@ app.post('/api/register', async (req, res) => {
             const currentKeyHeader = req.headers['x-current-api-key'];
             const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
             const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-            
+
             if (!knowsCurrentKey && !hasRegSecret) {
                 console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
                 return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
@@ -625,7 +622,11 @@ app.post('/api/register', async (req, res) => {
         }
     }
 
-    // New server — create it
+    // New server — create it. Require REGISTRATION_SECRET if set on the dashboard.
+    if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
+        return res.status(403).json({ error: 'Invalid registration secret. New servers must provide x-registration-secret header matching REGISTRATION_SECRET env var.' });
+    }
+
     const server = {
         serverId,
         apiKey,
