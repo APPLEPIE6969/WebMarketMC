@@ -417,7 +417,6 @@ function deserializeServer(row) {
 function serializeSession(token, s) {
     return {
         session_token: tokenHash(token), // PK is deterministic hash
-        encrypted_token: encrypt(token), // encrypted token in separate column
         server_id: s.serverId,
         player_uuid: encrypt(s.playerUuid),
         player_name: s.playerName || 'Player',
