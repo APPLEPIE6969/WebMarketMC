@@ -349,7 +349,7 @@ async function loadCacheFromDB() {
     for (const row of sessionRows) {
         if (row.expires > now) {
             const session = deserializeSession(row);
-            const tokenKey = tokenHash(row.session_token); // PK is tokenHash
+            const tokenKey = row.session_token; // PK is the tokenHash stored in session_token column
             sessionCache.set(tokenKey, session);
             loadedSessions++;
         }
@@ -417,7 +417,6 @@ function deserializeServer(row) {
 function serializeSession(token, s) {
     return {
         session_token: tokenHash(token), // PK is deterministic hash
-        encrypted_token: encrypt(token), // encrypted token in separate column
         server_id: s.serverId,
         player_uuid: encrypt(s.playerUuid),
         player_name: s.playerName || 'Player',
