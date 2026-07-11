@@ -1,10 +1,10 @@
 /**
  * Aurelium Web Dashboard — Central Server
- * 
+ *
  * A single Express instance that handles market dashboards
  * for multiple Minecraft servers. Each MC server syncs its
  * data here via outbound HTTP — no ports needed on the MC side.
- * 
+ *
  * Persistence: Astra DB (DataStaxa) via REST v2 API
  * Caching: In-memory write-through cache for performance
  * Encryption: AES-256-GCM field-level encryption for sensitive data
@@ -524,7 +524,7 @@ function requireApiKey(req, res, next) {
 app.post('/api/register', async (req, res) => {
     const regSecret = process.env.REGISTRATION_SECRET || '';
     if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
-        return res.status(403).json({ error: 'Invalid registration secret' });
+        return res.status(403).json({ error: 'Invalid registration secret. If you set registration-secret in your config.yml, try removing it (but save the value somewhere first). The plugin can rotate keys automatically using your existing api-key.' });
     }
     const { serverId, apiKey, serverName } = req.body;
 
@@ -543,7 +543,7 @@ app.post('/api/register', async (req, res) => {
             const currentKeyHeader = req.headers['x-current-api-key'];
             const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
             const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-            
+
             if (!knowsCurrentKey && !hasRegSecret) {
                 console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
                 return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
@@ -592,7 +592,7 @@ app.post('/api/register', async (req, res) => {
                 const currentKeyHeader = req.headers['x-current-api-key'];
                 const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
                 const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-                
+
                 if (!knowsCurrentKey && !hasRegSecret) {
                     console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
                     return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
@@ -865,64 +865,56 @@ app.get('/api/:serverId/categories', requireSession, (req, res) => {
 
 /** GET /api/:serverId/items?category=X&page=0 — Browser gets items */
 app.get('/api/:serverId/items', requireSession, (req, res) => {
-    const catId = req.query.category || '';
-    const page = parseInt(req.query.page) || 0;
-    const perPage = 28;
-
-    const allItems = req.server.items?.[catId] || [];
-    const totalPages = Math.max(1, Math.ceil(allItems.length / perPage));
-    const start = page * perPage;
-    const pageItems = allItems.slice(start, start + perPage);
-
-    res.json({ page, totalPages, totalItems: allItems.length, items: pageItems });
+    const { category, page = 0 } = req.query;
+    const items = req.server.items[category] || [];
+    const pageSize = 20;
+    const start = page * pageSize;
+    res.json({
+        items: items.slice(start, start + pageSize),
+        total: items.length,
+        page: parseInt(page),
+        pageSize,
+    });
 });
 
-/** GET /api/:serverId/search?q=X&page=0 — Browser searches items */
-app.get('/api/:serverId/search', requireSession, (req, res) => {
-    const query = (req.query.q || '').toLowerCase();
-    const page = parseInt(req.query.page) || 0;
-    const perPage = 28;
-
-    if (!query) return res.status(400).json({ error: 'Missing search query' });
-
-    const results = [];
-    const seen = new Set();
-    const items = req.server.items || {};
-    for (const catItems of Object.values(items)) {
-        for (const item of catItems) {
-            const key = item.key || item.name;
-            if (!seen.has(key) && item.name.toLowerCase().includes(query)) {
-                seen.add(key);
-                results.push(item);
-            }
-        }
-    }
-
-    const totalPages = Math.max(1, Math.ceil(results.length / perPage));
-    const start = page * perPage;
-    const pageItems = results.slice(start, start + perPage);
-
-    res.json({ page, totalPages, totalItems: results.length, items: pageItems });
-});
-
-/** GET /api/:serverId/auctions — Browser gets active auctions */
+/** GET /api/:serverId/auctions — Browser gets auctions */
 app.get('/api/:serverId/auctions', requireSession, (req, res) => {
-    res.type('json').send(req.server.auctionsJson || '[]');
+    try {
+        const auctions = JSON.parse(req.server.auctionsJson || '[]');
+        res.json(auctions);
+    } catch {
+        res.json([]);
+    }
 });
 
-/** GET /api/:serverId/orders — Browser gets active buy orders */
+/** GET /api/:serverId/orders — Browser gets buy orders */
 app.get('/api/:serverId/orders', requireSession, (req, res) => {
-    res.type('json').send(req.server.ordersJson || '[]');
+    try {
+        const orders = JSON.parse(req.server.ordersJson || '[]');
+        res.json(orders);
+    } catch {
+        res.json([]);
+    }
 });
 
-/** GET /api/:serverId/stocks — Browser gets stock/price data */
+/** GET /api/:serverId/stocks — Browser gets stocks */
 app.get('/api/:serverId/stocks', requireSession, (req, res) => {
-    res.type('json').send(req.server.stocksJson || '[]');
+    try {
+        const stocks = JSON.parse(req.server.stocksJson || '[]');
+        res.json(stocks);
+    } catch {
+        res.json([]);
+    }
 });
 
-/** GET /api/:serverId/price-history — Browser gets price history for charts */
+/** GET /api/:serverId/price-history — Browser gets price history */
 app.get('/api/:serverId/price-history', requireSession, (req, res) => {
-    res.type('json').send(req.server.priceHistoryJson || '{}');
+    try {
+        const history = JSON.parse(req.server.priceHistoryJson || '{}');
+        res.json(history);
+    } catch {
+        res.json({});
+    }
 });
 
 /** POST /api/:serverId/buy — Browser submits a purchase */
@@ -1038,85 +1030,41 @@ app.get('/api/:serverId/purchase-status', requireSession, (req, res) => {
     });
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// STATIC FILES + DASHBOARD PAGE
-// ═══════════════════════════════════════════════════════════════════
-
-app.use('/static', express.static(path.join(__dirname, 'public')));
-
-// Landing page
-app.get('/', (req, res) => {
-    const gaId = process.env.GA_MEASUREMENT_ID || 'G-RCQKF2LJVQ';
-    res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Aurelium Web Market</title>
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=${gaId}"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-  gtag('config', '${gaId}');
-</script>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<style>
-body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:#111218; color:#e8e8ec; font-family:'Inter', sans-serif; }
-.box { text-align:center; padding:48px 40px; border-radius:12px; background:#1e1f25; border:1px solid #2d2e36; box-shadow:0 8px 32px rgba(0,0,0,0.5); max-width:400px; width:90%; }
-.logo { display:flex; align-items:center; justify-content:center; gap:12px; margin-bottom:24px; }
-.logo svg { width:32px; height:32px; color:#f59e0b; fill:none; stroke:currentColor; stroke-width:2.2; stroke-linecap:round; stroke-linejoin:round; }
-.logo-title { font-size:24px; font-weight:800; background:linear-gradient(135deg, #f59e0b, #eab308); -webkit-background-clip:text; -webkit-text-fill-color:transparent; margin:0; }
-p { color:#9a9aad; font-size:15px; line-height:1.5; margin:0 0 32px 0; }
-code { background:#111218; padding:4px 8px; border-radius:6px; color:#1bd96a; font-weight:600; font-family:monospace; border:1px solid #2d2e36; }
-.link-btn { display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:12px 24px; background:#3b82f6; color:#fff; text-decoration:none; border-radius:8px; font-weight:600; font-size:14px; transition:all 0.2s ease; width:100%; box-sizing:border-box; }
-.link-btn:hover { background:#2563eb; transform:translateY(-1px); box-shadow:0 4px 12px rgba(59,130,246,0.3); }
-</style></head><body>
-<div class="box">
-    <div class="logo">
-        <svg viewBox="0 0 24 24"><path d="M14.5 2l7.5 7.5-7 7-7.5-7.5z"/><path d="M2 22l7-7"/><path d="M11 13l3.5-3.5"/></svg>
-        <h1 class="logo-title">Server Market</h1>
-    </div>
-    <p>Run <code>/web</code> in-game to get your personal dashboard link and start trading!</p>
-    <a href="https://modrinth.com/plugin/aurelium" target="_blank" class="link-btn">
-        <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" style="width:18px;height:18px;stroke-width:2.5;stroke-linecap:round;stroke-linejoin:round;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-        Download Plugin
-    </a>
-</div>
-</body></html>`);
+/** GET /api/:serverId/pending-purchases — Browser gets pending purchases */
+app.get('/api/:serverId/pending-purchases', requireSession, (req, res) => {
+    res.json(getPendingPurchases(req.serverId).map(p => ({
+        id: p.id, itemKey: p.itemKey, amount: p.amount,
+        currency: p.currency, status: p.status,
+    })));
 });
 
-// Dashboard entry point
-let indexHtmlCache = null;
-setInterval(() => { indexHtmlCache = null; }, 3600_000);
-app.get('/shop/:serverId', (req, res) => {
-    try {
-        if (!indexHtmlCache) {
-            indexHtmlCache = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
-        }
-        const gaId = process.env.GA_MEASUREMENT_ID || 'G-RCQKF2LJVQ';
-        const finalHtml = indexHtmlCache.replace(/G-XXXXXXXXXX/g, gaId);
-        res.send(finalHtml);
-    } catch (e) {
-        console.error('Failed to serve index.html:', e);
-        res.status(500).send('Server Error');
-    }
+/** GET /api/:serverId/shop — Public shop page (no auth) */
+app.get('/api/:serverId/shop', (req, res) => {
+    const server = serverCache.get(req.params.serverId);
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+    res.json({
+        serverName: server.serverName,
+        categories: server.categories,
+        items: server.items,
+        auctions: JSON.parse(server.auctionsJson || '[]'),
+        orders: JSON.parse(server.ordersJson || '[]'),
+        stocks: JSON.parse(server.stocksJson || '[]'),
+        priceHistory: JSON.parse(server.priceHistoryJson || '{}'),
+    });
 });
 
-// ═══════════════════════════════════════════════════════════════════
-// HELPERS
-// ═══════════════════════════════════════════════════════════════════
-
-function getPendingPurchases(serverId, playerUuid) {
-    const pending = [];
+// ── Helper: get pending purchases for a server ─────────────────
+function getPendingPurchases(serverId) {
+    const result = [];
     for (const [id, p] of purchaseCache) {
-        if (p.serverId === serverId && p.status === 'pending' && (!playerUuid || p.playerUuid === playerUuid)) {
-            pending.push({ id, ...p });
+        if (p.serverId === serverId && p.status === 'pending') {
+            result.push({ id, itemKey: p.itemKey, amount: p.amount, currency: p.currency, status: p.status });
         }
     }
-    return pending;
+    return result;
 }
 
-// Cleanup expired sessions and old purchases every 60 seconds
+// ── Periodic Cleanup (expired sessions, stale purchases) ────────
 setInterval(async () => {
     const now = Date.now();
     const sessionDeletes = [];
@@ -1131,10 +1079,11 @@ setInterval(async () => {
     }
 
     for (const [id, p] of purchaseCache) {
-        if (p.status !== 'pending' && now - p.createdAt > 300_000) {
+        const age = now - p.createdAt;
+        if (p.status === 'pending' && age > 600_000) {
             purchaseCache.delete(id);
             purchaseDeletes.push(id);
-        } else if (p.status === 'pending' && now - p.createdAt > 600_000) {
+        } else if (p.status !== 'pending' && age > 300_000) {
             purchaseCache.delete(id);
             purchaseDeletes.push(id);
         }
