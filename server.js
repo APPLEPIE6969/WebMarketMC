@@ -561,43 +561,7 @@ app.post('/api/register', async (req, res) => {
     // Check if server already exists in cache
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
-        if (existing.apiKey !== apiKey) {
-            // API key mismatch — allow rotation if caller proves knowledge of
-            // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
-            // This prevents takeover via public /shop/:serverId URL while allowing
-            // legitimate server restarts (which know their current key).
-            const currentKeyHeader = req.headers['x-current-api-key'];
-            const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
-            const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-
-            if (!knowsCurrentKey && !hasRegSecret) {
-                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
-                return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
-            }
-            console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
-            const oldApiKey = existing.apiKey;
-            const oldServerName = existing.serverName;
-            const oldLastSync = existing.lastSync;
-            existing.apiKey = apiKey;
-            existing.serverName = serverName || existing.serverName;
-            existing.lastSync = Date.now();
-            if (ASTRA_TOKEN) {
-                const updateResult = await astraUpdate('servers', serverId, {
-                    api_key: encrypt(apiKey),
-                    server_name: existing.serverName,
-                    last_sync: existing.lastSync,
-                });
-                if (!updateResult.ok) {
-                    // Rollback cache to pre-rotation state so a retry takes the mismatch path again
-                    existing.apiKey = oldApiKey;
-                    existing.serverName = oldServerName;
-                    existing.lastSync = oldLastSync;
-                    console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
-                    return res.status(500).json({ error: 'Failed to update server credentials' });
-                }
-            }
-            return res.json({ success: true, reRegistered: true });
-        } else {
+        if (existing.apiKey === apiKey) {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
@@ -605,6 +569,37 @@ app.post('/api/register', async (req, res) => {
             }
             return res.json({ success: true });
         }
+        // API key mismatch in cache — check DB to see if caller knows the DB key
+        if (ASTRA_TOKEN) {
+            const dbResult = await astraGet('servers', serverId);
+            if (dbResult.ok && dbResult.data?.data) {
+                const dbServer = deserializeServer(dbResult.data.data);
+                const currentKeyHeader = req.headers['x-current-api-key'];
+                const knowsCurrentKey = currentKeyHeader && currentKeyHeader === dbServer.apiKey;
+                const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+                if (knowsCurrentKey || hasRegSecret) {
+                    console.log(`[Register] Cache/DB mismatch resolved for ${serverId} (authorized key rotation)`);
+                    const oldApiKey = dbServer.apiKey;
+                    dbServer.apiKey = apiKey;
+                    dbServer.serverName = serverName || dbServer.serverName;
+                    dbServer.lastSync = Date.now();
+                    const updateResult = await astraUpdate('servers', serverId, {
+                        api_key: encrypt(apiKey),
+                        server_name: dbServer.serverName,
+                        last_sync: dbServer.lastSync,
+                    });
+                    if (!updateResult.ok) {
+                        console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
+                        return res.status(500).json({ error: 'Failed to update server credentials' });
+                    }
+                    serverCache.set(serverId, dbServer);
+                    return res.json({ success: true, reRegistered: true });
+                }
+            }
+        }
+        // No DB fallback or caller doesn't know DB key — reject
+        console.log(`[Register] Cache API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+        return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
     }
 
     // Check Astra DB for existing server (may have survived a restart)
