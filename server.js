@@ -344,18 +344,27 @@ async function loadCacheFromDB() {
 
     // Encryption mismatch detection: if any encrypted value failed to decrypt (returns raw ciphertext),
     // disable encryption mode so the dashboard can still function with plaintext keys
-    // Also remove the problematic server entries from cache so they can re-register fresh
+    // Also remove the problematic server entries from cache AND database so they can re-register fresh
     let encryptionMismatch = false;
     const serversToRemove = [];
     for (const [serverId, server] of serverCache.entries()) {
         if (server.apiKey && server.apiKey.startsWith(ENCRYPTION_PREFIX)) {
-            console.error(`[Encryption] MISMATCH DETECTED for server ${serverId}: stored apiKey is encrypted but decryption failed (wrong ENCRYPTION_KEY?). Removing from cache for fresh registration.`);
+            console.error(`[Encryption] MISMATCH DETECTED for server ${serverId}: stored apiKey is encrypted but decryption failed (wrong ENCRYPTION_KEY?). Removing from cache AND database for fresh registration.`);
             serversToRemove.push(serverId);
             encryptionMismatch = true;
         }
     }
     for (const serverId of serversToRemove) {
         serverCache.delete(serverId);
+        // Also delete from Astra DB so register endpoint doesn't find stale encrypted entry
+        if (ASTRA_TOKEN) {
+            try {
+                await astraDelete('servers', serverId);
+                console.log(`[Encryption] Deleted stale server ${serverId} from Astra DB`);
+            } catch (e) {
+                console.error(`[Encryption] Failed to delete stale server ${serverId} from Astra DB:`, e.message);
+            }
+        }
     }
     if (encryptionMismatch) {
         encryptionEnabled = false;
