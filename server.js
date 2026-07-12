@@ -344,13 +344,18 @@ async function loadCacheFromDB() {
 
     // Encryption mismatch detection: if any encrypted value failed to decrypt (returns raw ciphertext),
     // disable encryption mode so the dashboard can still function with plaintext keys
+    // Also remove the problematic server entries from cache so they can re-register fresh
     let encryptionMismatch = false;
+    const serversToRemove = [];
     for (const [serverId, server] of serverCache.entries()) {
         if (server.apiKey && server.apiKey.startsWith(ENCRYPTION_PREFIX)) {
-            console.error(`[Encryption] MISMATCH DETECTED for server ${serverId}: stored apiKey is encrypted but decryption failed (wrong ENCRYPTION_KEY?). Disabling encryption mode.`);
+            console.error(`[Encryption] MISMATCH DETECTED for server ${serverId}: stored apiKey is encrypted but decryption failed (wrong ENCRYPTION_KEY?). Removing from cache for fresh registration.`);
+            serversToRemove.push(serverId);
             encryptionMismatch = true;
-            break;
         }
+    }
+    for (const serverId of serversToRemove) {
+        serverCache.delete(serverId);
     }
     if (encryptionMismatch) {
         encryptionEnabled = false;
