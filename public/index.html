@@ -116,7 +116,7 @@
                         <circle cx="11" cy="11" r="8" />
                         <line x1="21" y1="21" x2="16.65" y2="16.65" />
                     </svg>
-                    <input type="text" id="market-search" placeholder="Search items..." oninput="handleSearch(this)">
+                    <input type="text" id="search-input" placeholder="Search items..." autocomplete="off">
                 </div>
                 <div class="items-grid" id="items-grid"></div>
                 <div class="pagination" id="pagination"></div>
@@ -135,6 +135,13 @@
 
             <!-- Content area -->
             <main class="content">
+                <div class="auction-search-bar">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8" />
+                        <line x1="21" y1="21" x2="16.65" y2="16.65" />
+                    </svg>
+                    <input type="text" id="auction-search" placeholder="Search auctions..." autocomplete="off">
+                </div>
                 <div class="auctions-grid" id="auctions-grid"></div>
             </main>
         </div>

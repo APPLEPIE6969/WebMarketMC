@@ -1058,7 +1058,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
             <div class="chart-modal-header">
                 <h3>
                     <img src="${getItemIconUrl(material || 'stone')}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
-                    ${name}
+                    ${esc(name)}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
                     <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
