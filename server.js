@@ -561,49 +561,65 @@ app.post('/api/register', async (req, res) => {
     // Check if server already exists in cache
     if (serverCache.has(serverId)) {
         const existing = serverCache.get(serverId);
-        if (existing.apiKey !== apiKey) {
-            // API key mismatch — allow rotation if caller proves knowledge of
-            // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
-            // This prevents takeover via public /shop/:serverId URL while allowing
-            // legitimate server restarts (which know their current key).
-            const currentKeyHeader = req.headers['x-current-api-key'];
-            const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
-            const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-
-            if (!knowsCurrentKey && !hasRegSecret) {
-                console.log(`[Register] API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
-                return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
-            }
-            console.log(`[Register] API key updated for ${serverId} (authorized key rotation)`);
-            const oldApiKey = existing.apiKey;
-            const oldServerName = existing.serverName;
-            const oldLastSync = existing.lastSync;
-            existing.apiKey = apiKey;
-            existing.serverName = serverName || existing.serverName;
-            existing.lastSync = Date.now();
-            if (ASTRA_TOKEN) {
-                const updateResult = await astraUpdate('servers', serverId, {
-                    api_key: encrypt(apiKey),
-                    server_name: existing.serverName,
-                    last_sync: existing.lastSync,
-                });
-                if (!updateResult.ok) {
-                    // Rollback cache to pre-rotation state so a retry takes the mismatch path again
-                    existing.apiKey = oldApiKey;
-                    existing.serverName = oldServerName;
-                    existing.lastSync = oldLastSync;
-                    console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
-                    return res.status(500).json({ error: 'Failed to update server credentials' });
-                }
-            }
-            return res.json({ success: true, reRegistered: true });
-        } else {
+        if (existing.apiKey === apiKey) {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
-                await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
+                const syncResult = await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
+                if (!syncResult.ok) {
+                    console.error('[Register] Failed to persist last_sync to Astra:', syncResult.error);
+                }
             }
             return res.json({ success: true });
+        }
+        // API key mismatch in cache — check DB to see if caller knows the DB key
+        // First: auto-cleanup stale encrypted cache entries (decryption failed due to key change)
+        if (existing.apiKey && existing.apiKey.startsWith(ENCRYPTION_PREFIX)) {
+            console.warn(`[Register] Stale encrypted cache entry for ${serverId}. Auto-deleting and allowing fresh registration.`);
+            serverCache.delete(serverId);
+            if (ASTRA_TOKEN) {
+                try { await astraDelete('servers', serverId); } catch (e) { console.error('[Register] Failed to delete stale DB entry:', e.message); }
+            }
+            // Fall through to fresh registration (after cache/DB check below)
+        } else if (ASTRA_TOKEN) {
+            const dbResult = await astraGet('servers', serverId);
+            if (dbResult.ok && dbResult.data?.data) {
+                const dbServer = deserializeServer(dbResult.data.data);
+                // Also check DB entry for stale encryption
+                if (dbServer.apiKey && dbServer.apiKey.startsWith(ENCRYPTION_PREFIX)) {
+                    console.warn(`[Register] Stale encrypted DB entry for ${serverId}. Auto-deleting and allowing fresh registration.`);
+                    await astraDelete('servers', serverId);
+                    serverCache.delete(serverId);
+                    // Fall through to fresh registration
+                } else {
+                    const currentKeyHeader = req.headers['x-current-api-key'];
+                    const knowsCurrentKey = currentKeyHeader && currentKeyHeader === dbServer.apiKey;
+                    const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
+                    if (knowsCurrentKey || hasRegSecret) {
+                        console.log(`[Register] Cache/DB mismatch resolved for ${serverId} (authorized key rotation)`);
+                        dbServer.apiKey = apiKey;
+                        dbServer.serverName = serverName || dbServer.serverName;
+                        dbServer.lastSync = Date.now();
+                        const updateResult = await astraUpdate('servers', serverId, {
+                            api_key: encrypt(apiKey),
+                            server_name: dbServer.serverName,
+                            last_sync: dbServer.lastSync,
+                        });
+                        if (!updateResult.ok) {
+                            console.error('[Register] Failed to persist API key rotation to Astra:', updateResult.error);
+                            return res.status(500).json({ error: 'Failed to update server credentials' });
+                        }
+                        serverCache.set(serverId, dbServer);
+                        return res.json({ success: true, reRegistered: true });
+                    }
+                }
+            }
+        }
+        // If we reach here after stale cleanup, fall through to DB check / fresh registration
+        // Only reject if there's a real (non-stale) mismatch
+        if (serverCache.has(serverId)) {
+            console.log(`[Register] Cache API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+            return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
         }
     }
 
@@ -612,13 +628,25 @@ app.post('/api/register', async (req, res) => {
         const dbResult = await astraGet('servers', serverId);
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
-            if (existing.apiKey !== apiKey) {
+
+            // Auto-cleanup: if the stored apiKey is still encrypted (decryption failed due to
+            // key mismatch), the entry is stale and unusable. Delete it and allow fresh
+            // registration instead of returning 403. This makes the dashboard self-healing
+            // without requiring admin UI, REGISTRATION_SECRET, or manual intervention.
+            if (existing.apiKey && existing.apiKey.startsWith(ENCRYPTION_PREFIX)) {
+                console.warn(`[Register] Stale encrypted entry for ${serverId} (decryption failed). Auto-deleting and allowing fresh registration.`);
+                await astraDelete('servers', serverId);
+                serverCache.delete(serverId);
+                // Fall through to fresh registration (skip the mismatch check below)
+            } else {
+                // Only check for mismatch if not a stale entry
+                if (existing.apiKey !== apiKey) {
                 // API key mismatch — allow rotation if caller proves knowledge of
                 // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
                 const currentKeyHeader = req.headers['x-current-api-key'];
                 const knowsCurrentKey = currentKeyHeader && currentKeyHeader === existing.apiKey;
                 const hasRegSecret = regSecret && req.headers['x-registration-secret'] === regSecret;
-                
+
                 if (!knowsCurrentKey && !hasRegSecret) {
                     console.log(`[Register] DB API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
                     return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
@@ -649,9 +677,10 @@ app.post('/api/register', async (req, res) => {
                 return res.json({ success: true });
             }
         }
-    }
+                }
+            }
 
-    // New server — create it. Require REGISTRATION_SECRET if set on the dashboard.
+            // New server — create it. Require REGISTRATION_SECRET if set on the dashboard.
     if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
         return res.status(403).json({ error: 'Invalid registration secret. New servers must provide x-registration-secret header matching REGISTRATION_SECRET env var.' });
     }
