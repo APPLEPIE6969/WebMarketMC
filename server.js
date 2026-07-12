@@ -338,7 +338,14 @@ async function loadCacheFromDB() {
     // Load servers (all pages, max 1000 to prevent OOM)
     const serverRows = await loadAllPages('servers', 500, 1000);
     for (const row of serverRows) {
-        serverCache.set(row.server_id, deserializeServer(row));
+        const server = deserializeServer(row);
+        // Detect encryption mismatch: stored value is encrypted but encryption is disabled
+        if (typeof server.apiKey === 'string' && server.apiKey.startsWith(ENCRYPTION_PREFIX) && !encryptionEnabled) {
+            console.error('[Cache] Encryption mismatch: server ' + server.serverId + ' has encrypted API key but ENCRYPTION_KEY is not set. Set ENCRYPTION_KEY in environment variables.');
+            // Don't cache this server - it will fail auth anyway
+            continue;
+        }
+        serverCache.set(row.server_id, server);
     }
     console.log(`[Cache] Loaded ${serverCache.size} servers`);
 
@@ -582,6 +589,11 @@ app.post('/api/register', async (req, res) => {
         const dbResult = await astraGet('servers', serverId);
         if (dbResult.ok && dbResult.data?.data) {
             const existing = deserializeServer(dbResult.data.data);
+            // Detect encryption mismatch: stored value is encrypted but encryption is disabled
+            if (typeof existing.apiKey === 'string' && existing.apiKey.startsWith(ENCRYPTION_PREFIX) && !encryptionEnabled) {
+                console.error('[Register] Encryption mismatch: stored API key is encrypted but ENCRYPTION_KEY is not set on this dashboard instance. Set ENCRYPTION_KEY in environment variables to match the deployment that created this server record.');
+                return res.status(500).json({ error: 'Server credential encryption mismatch. Dashboard ENCRYPTION_KEY configuration has changed.' });
+            }
             if (existing.apiKey !== apiKey) {
                 // API key mismatch — allow rotation if caller proves knowledge of
                 // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
