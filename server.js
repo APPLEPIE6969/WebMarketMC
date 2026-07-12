@@ -565,7 +565,10 @@ app.post('/api/register', async (req, res) => {
             // Same key — re-register: update lastSync
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
-                await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
+                const syncResult = await astraUpdate('servers', serverId, { last_sync: existing.lastSync });
+                if (!syncResult.ok) {
+                    console.error('[Register] Failed to persist last_sync to Astra:', syncResult.error);
+                }
             }
             return res.json({ success: true });
         }
@@ -577,6 +580,7 @@ app.post('/api/register', async (req, res) => {
             if (ASTRA_TOKEN) {
                 try { await astraDelete('servers', serverId); } catch (e) { console.error('[Register] Failed to delete stale DB entry:', e.message); }
             }
+            // Fall through to fresh registration (after cache/DB check below)
         } else if (ASTRA_TOKEN) {
             const dbResult = await astraGet('servers', serverId);
             if (dbResult.ok && dbResult.data?.data) {
@@ -586,6 +590,7 @@ app.post('/api/register', async (req, res) => {
                     console.warn(`[Register] Stale encrypted DB entry for ${serverId}. Auto-deleting and allowing fresh registration.`);
                     await astraDelete('servers', serverId);
                     serverCache.delete(serverId);
+                    // Fall through to fresh registration
                 } else {
                     const currentKeyHeader = req.headers['x-current-api-key'];
                     const knowsCurrentKey = currentKeyHeader && currentKeyHeader === dbServer.apiKey;
@@ -610,9 +615,12 @@ app.post('/api/register', async (req, res) => {
                 }
             }
         }
-        // No DB fallback or caller doesn't know DB key — reject
-        console.log(`[Register] Cache API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
-        return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
+        // If we reach here after stale cleanup, fall through to DB check / fresh registration
+        // Only reject if there's a real (non-stale) mismatch
+        if (serverCache.has(serverId)) {
+            console.log(`[Register] Cache API key mismatch for ${serverId} — rejecting (no proof of current key or REGISTRATION_SECRET)`);
+            return res.status(403).json({ error: 'Server ID already registered with different API key. Provide x-current-api-key header with current key, or configure REGISTRATION_SECRET.' });
+        }
     }
 
     // Check Astra DB for existing server (may have survived a restart)
@@ -629,7 +637,10 @@ app.post('/api/register', async (req, res) => {
                 console.warn(`[Register] Stale encrypted entry for ${serverId} (decryption failed). Auto-deleting and allowing fresh registration.`);
                 await astraDelete('servers', serverId);
                 serverCache.delete(serverId);
-            } else if (existing.apiKey !== apiKey) {
+                // Fall through to fresh registration (skip the mismatch check below)
+            } else {
+                // Only check for mismatch if not a stale entry
+                if (existing.apiKey !== apiKey) {
                 // API key mismatch — allow rotation if caller proves knowledge of
                 // current key (x-current-api-key header) OR REGISTRATION_SECRET is set.
                 const currentKeyHeader = req.headers['x-current-api-key'];
@@ -666,9 +677,10 @@ app.post('/api/register', async (req, res) => {
                 return res.json({ success: true });
             }
         }
-    }
+                }
+            }
 
-    // New server — create it. Require REGISTRATION_SECRET if set on the dashboard.
+            // New server — create it. Require REGISTRATION_SECRET if set on the dashboard.
     if (regSecret && req.headers['x-registration-secret'] !== regSecret) {
         return res.status(403).json({ error: 'Invalid registration secret. New servers must provide x-registration-secret header matching REGISTRATION_SECRET env var.' });
     }
