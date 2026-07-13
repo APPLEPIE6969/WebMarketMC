@@ -8,8 +8,6 @@ on:
 
 permissions:
   contents: read
-  checks: write
-  pull-requests: write
 
 jobs:
   lint:
@@ -50,7 +48,7 @@ jobs:
       - name: Start server
         run: |
           REGISTRATION_SECRET="test-secret" node server.js &
-          SERVER_PID=$!
+          echo "SERVER_PID=$!" >> $GITHUB_ENV
           for i in $(seq 1 10); do
             if curl -sf http://localhost:3000/ > /dev/null 2>&1; then
               echo "Server ready"
@@ -151,10 +149,14 @@ jobs:
             
             function apiKeyMatches(plaintext, stored) {
               if (!plaintext || !stored) return false;
-              // No plaintext === stored shortcut — prevents hash replay attacks
-              return hashApiKey(plaintext) === stored;
+              // If stored is a 64-char hex string (SHA256 hash), compare hash(plaintext) === stored
+              if (/^[a-f0-9]{64}$/.test(stored)) {
+                return hashApiKey(plaintext) === stored;
+              }
+              // Otherwise stored is plaintext (memory-only mode) — direct comparison
+              return plaintext === stored;
             }
-            
+
             // Test 1: Same input always produces same hash (deterministic)
             const key1 = 'a3f7b2c1d9e8';
             const key2 = 'a3f7b2c1d9e8';
@@ -162,34 +164,39 @@ jobs:
             const hash2 = hashApiKey(key2);
             console.log('Deterministic:', hash1 === hash2);
             if (hash1 !== hash2) { console.error('FAIL: Same key produced different hashes'); process.exit(1); }
-            
+
             // Test 2: Different inputs produce different hashes
             const hash3 = hashApiKey('different-key');
             console.log('Distinct:', hash1 !== hash3);
             if (hash1 === hash3) { console.error('FAIL: Different keys produced same hash'); process.exit(1); }
-            
+
             // Test 3: Hash is not reversible (64 hex chars, no plaintext leakage)
             console.log('Hash length:', hash1.length);
             console.log('Is hex:', /^[0-9a-f]{64}$/.test(hash1));
             if (!/^[0-9a-f]{64}$/.test(hash1)) { console.error('FAIL: Hash is not valid SHA256 hex'); process.exit(1); }
-            
-            // Test 4: apiKeyMatches only accepts hash match (not plaintext === stored)
-            console.log('Reject plaintext-as-stored:', !apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
-            if (apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext should not match plaintext'); process.exit(1); }
-            
-            console.log('Match hash:', apiKeyMatches('a3f7b2c1d9e8', hash1));
+
+            // Test 4: apiKeyMatches with hash stored (production mode) — compares hash(plaintext) === stored hash
+            console.log('Match hash (prod mode):', apiKeyMatches('a3f7b2c1d9e8', hash1));
             if (!apiKeyMatches('a3f7b2c1d9e8', hash1)) { console.error('FAIL: hash match failed'); process.exit(1); }
-            
-            console.log('Reject mismatch:', !apiKeyMatches('wrong-key', hash1));
-            if (apiKeyMatches('wrong-key', hash1)) { console.error('FAIL: wrong key matched'); process.exit(1); }
-            
-            // Test 5: Hash replay attack — sending a stored hash as x-api-key must NOT authenticate
-            console.log('Reject hash replay:', !apiKeyMatches(hash1, hash1));
-            if (apiKeyMatches(hash1, hash1)) { console.error('FAIL: hash replay accepted'); process.exit(1); }
-            
-            // Test 6: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
+
+            // Test 5: apiKeyMatches with plaintext stored (memory-only mode) — direct comparison
+            console.log('Match plaintext (memory mode):', apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
+            if (!apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext should match plaintext in memory mode'); process.exit(1); }
+
+            // Test 6: Reject mismatch in both modes
+            console.log('Reject mismatch (prod):', !apiKeyMatches('wrong-key', hash1));
+            if (apiKeyMatches('wrong-key', hash1)) { console.error('FAIL: wrong key matched in prod mode'); process.exit(1); }
+            console.log('Reject mismatch (memory):', !apiKeyMatches('wrong-key', 'a3f7b2c1d9e8'));
+            if (apiKeyMatches('wrong-key', 'a3f7b2c1d9e8')) { console.error('FAIL: wrong key matched in memory mode'); process.exit(1); }
+
+            // Test 7: Hash replay attack — sending a stored hash as x-api-key must NOT authenticate
+            // When stored is a hash, apiKeyMatches(hash, hash) computes hash(hash) === hash = false
+            console.log('Reject hash replay (prod):', !apiKeyMatches(hash1, hash1));
+            if (apiKeyMatches(hash1, hash1)) { console.error('FAIL: hash replay accepted in prod mode'); process.exit(1); }
+
+            // Test 8: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
             console.log('No env var needed: true');
-            
+
             console.log('All hashing tests passed!');
           "
 

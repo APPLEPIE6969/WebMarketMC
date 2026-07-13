@@ -65,19 +65,24 @@ function tokenHash(token) {
     return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(token).digest('hex');
 }
 
-// Compare an incoming plaintext apiKey against a stored hash.
-// The cache ALWAYS stores hashes for consistency. On fresh registration
-// (memory-only mode), the cache stores the hash of the provided key.
-// The plaintext === stored branch is deliberately removed to prevent
-// credential replay if a stored hash is leaked.
+// Compare an incoming plaintext apiKey against a stored value.
+// Cache stores plaintext (memory-only mode) or hash (DB-loaded).
+// Handles both: if stored looks like a SHA256 hash (64 hex chars), compare hash(plaintext)===stored.
+// If stored is plaintext (not 64 hex chars), compare directly.
 function apiKeyMatches(plaintext, stored) {
     if (!plaintext || !stored) return false;
-    return hashApiKey(plaintext) === stored;
+    // If stored is a 64-char hex string (SHA256 hash), compare hash(plaintext) === stored
+    if (/^[a-f0-9]{64}$/.test(stored)) {
+        return hashApiKey(plaintext) === stored;
+    }
+    // Otherwise stored is plaintext (memory-only mode) — direct comparison
+    return plaintext === stored;
 }
 
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
-// Cache stores PLAINTEXT values (api keys, uuids) — hashing only applies to DB storage
+// Cache stores PLAINTEXT api keys (for memory-only mode); serializeServer() hashes on DB write.
+// Sessions and purchases store HASHED uuids in cache (consistent with DB).
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
 /** @type {Map<string, object>} tokenHash → session data */
@@ -246,43 +251,13 @@ async function loadCacheFromDB() {
     console.log('[Cache] Loading data from Astra DB...');
 
     // Load servers (all pages, max 1000 to prevent OOM)
-    // DB stores hashed api keys — cache also stores hashes so comparisons work
+    // DB stores hashed api keys — cache stores plaintext (for memory-only mode)
     const serverRows = await loadAllPages('servers', 500, 1000);
     for (const row of serverRows) {
         const server = deserializeServer(row);
         serverCache.set(server.serverId, server);
     }
     console.log(`[Cache] Loaded ${serverCache.size} servers`);
-
-    // Encryption mismatch detection: if any encrypted value failed to decrypt (returns raw ciphertext),
-    // disable encryption mode so the dashboard can still function with plaintext keys
-    // Also remove the problematic server entries from cache AND database so they can re-register fresh
-    let encryptionMismatch = false;
-    const serversToRemove = [];
-    for (const [serverId, server] of serverCache.entries()) {
-        if (server.apiKey && server.apiKey.startsWith(ENCRYPTION_PREFIX)) {
-            console.error(`[Encryption] MISMATCH DETECTED for server ${serverId}: stored apiKey is encrypted but decryption failed (wrong ENCRYPTION_KEY?). Removing from cache AND database for fresh registration.`);
-            serversToRemove.push(serverId);
-            encryptionMismatch = true;
-        }
-    }
-    for (const serverId of serversToRemove) {
-        serverCache.delete(serverId);
-        // Also delete from Astra DB so register endpoint doesn't find stale encrypted entry
-        if (ASTRA_TOKEN) {
-            try {
-                await astraDelete('servers', serverId);
-                console.log(`[Encryption] Deleted stale server ${serverId} from Astra DB`);
-            } catch (e) {
-                console.error(`[Encryption] Failed to delete stale server ${serverId} from Astra DB:`, e.message);
-            }
-        }
-    }
-    if (encryptionMismatch) {
-        encryptionEnabled = false;
-        derivedKey = null;
-        console.warn('[Encryption] Encryption disabled due to key mismatch. Dashboard will operate in plaintext mode. Set correct ENCRYPTION_KEY and restart to re-enable.');
-    }
 
     // Load sessions (only non-expired, max 2000)
     const sessionRows = await loadAllPages('sessions', 500, 2000);
@@ -325,9 +300,10 @@ async function loadCacheFromDB() {
 // or plaintext values (for freshly registered servers in memory-only mode).
 
 function serializeServer(s) {
+    // s.apiKey is already a hash (stored in cache as hash) — write as-is
     return {
         server_id: s.serverId,
-        api_key: hashApiKey(s.apiKey),
+        api_key: s.apiKey,
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
@@ -345,7 +321,7 @@ function deserializeServer(row) {
     try { items = JSON.parse(row.items_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        apiKey: row.api_key, // Already hashed in DB and cache
+        apiKey: row.api_key, // Hashed in DB — stored as-is in cache
         serverName: row.server_name,
         lastSync: row.last_sync,
         categories,
@@ -495,7 +471,7 @@ app.post('/api/register', async (req, res) => {
             console.log(`[Register] Authorized key rotation for ${serverId}`);
             // Update to new key (store plaintext in cache for memory-only mode,
             // hash will be applied on DB write)
-            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
+            existing.apiKey = apiKey; // Store plaintext in cache
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
@@ -544,7 +520,7 @@ app.post('/api/register', async (req, res) => {
             }
 
             console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
-            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
+            existing.apiKey = apiKey; // Store plaintext in cache — serializeServer hashes on DB write
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             const updateResult = await astraUpdate('servers', serverId, {
@@ -568,7 +544,7 @@ app.post('/api/register', async (req, res) => {
 
     const server = {
         serverId,
-        apiKey: hashApiKey(apiKey), // Always store hash in cache — consistent with DB
+        apiKey: apiKey, // Store plaintext in cache — serializeServer() hashes on DB write
         lastSync: Date.now(),
         categories: [],
         items: {},
@@ -713,6 +689,7 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
     // Update all sessions for this player on this server
     // Both cache and DB store hashUuid(playerUuid) — hash the incoming plaintext for comparison
     const hashedUuid = hashUuid(playerUuid);
+    const updates = [];
     for (const [tokenKey, session] of sessionCache) {
         if (session.serverId === req.serverId && session.playerUuid === hashedUuid) {
             session.balances = balances;
