@@ -300,10 +300,11 @@ async function loadCacheFromDB() {
 // or plaintext values (for freshly registered servers in memory-only mode).
 
 function serializeServer(s) {
-    // s.apiKey is already a hash (stored in cache as hash) — write as-is
+    // Always hash the API key for DB storage — cache may hold plaintext
+    const dbKey = /^[a-f0-9]{64}$/.test(s.apiKey) ? s.apiKey : hashApiKey(s.apiKey);
     return {
         server_id: s.serverId,
-        api_key: s.apiKey,
+        api_key: dbKey,
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
