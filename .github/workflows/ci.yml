@@ -108,14 +108,14 @@ jobs:
 
       - name: Test invalid bid (non-numeric amount)
         run: |
-          curl -sf -X POST http://localhost:3000/api/test-server/bid \
+          curl -s -X POST http://localhost:3000/api/test-server/bid \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer test-session-token" \
             -d '{"auctionId":1,"amount":"abc"}' | jq -e '.error'
 
       - name: Test invalid fill-order (non-integer orderId)
         run: |
-          curl -sf -X POST http://localhost:3000/api/test-server/fill-order \
+          curl -s -X POST http://localhost:3000/api/test-server/fill-order \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer test-session-token" \
             -d '{"orderId":"abc","amount":5}' | jq -e '.error'
