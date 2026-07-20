@@ -77,7 +77,7 @@ function apiKeyMatches(plaintext, stored) {
 
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
-// Cache stores PLAINTEXT values (api keys, uuids) — hashing only applies to DB storage
+// Cache stores HASHED api keys (consistent with DB) — never plaintext
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
 /** @type {Map<string, object>} tokenHash → session data */
@@ -289,15 +289,13 @@ async function loadCacheFromDB() {
 }
 
 // ── Serialization Helpers (with hashing) ─────────────────────
-// Serialization HASHES sensitive fields before writing to Astra DB.
+// The cache ALWAYS stores hashed api keys. serializeServer() writes them as-is.
 // Deserialization returns hashed values as-is — comparisons use apiKeyMatches().
-// The in-memory cache stores hashed values (for servers loaded from DB)
-// or plaintext values (for freshly registered servers in memory-only mode).
 
 function serializeServer(s) {
     return {
         server_id: s.serverId,
-        api_key: hashApiKey(s.apiKey),
+        api_key: s.apiKey,
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
