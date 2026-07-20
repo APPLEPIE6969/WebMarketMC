@@ -65,24 +65,19 @@ function tokenHash(token) {
     return crypto.createHmac('sha256', SESSION_HMAC_KEY).update(token).digest('hex');
 }
 
-// Compare an incoming plaintext apiKey against a stored value.
-// Cache stores plaintext (memory-only mode) or hash (DB-loaded).
-// Handles both: if stored looks like a SHA256 hash (64 hex chars), compare hash(plaintext)===stored.
-// If stored is plaintext (not 64 hex chars), compare directly.
+// Compare an incoming plaintext apiKey against a stored hash.
+// The cache ALWAYS stores hashes for consistency. On fresh registration
+// (memory-only mode), the cache stores the hash of the provided key.
+// The plaintext === stored branch is deliberately removed to prevent
+// credential replay if a stored hash is leaked.
 function apiKeyMatches(plaintext, stored) {
     if (!plaintext || !stored) return false;
-    // If stored is a 64-char hex string (SHA256 hash), compare hash(plaintext) === stored
-    if (/^[a-f0-9]{64}$/.test(stored)) {
-        return hashApiKey(plaintext) === stored;
-    }
-    // Otherwise stored is plaintext (memory-only mode) — direct comparison
-    return plaintext === stored;
+    return hashApiKey(plaintext) === stored;
 }
 
 // ── In-Memory Write-Through Cache ──────────────────────────────
 // These cache Astra DB data for fast reads; writes go to DB first
-// Cache stores PLAINTEXT api keys (for memory-only mode); serializeServer() hashes on DB write.
-// Sessions and purchases store HASHED uuids in cache (consistent with DB).
+// Cache stores PLAINTEXT values (api keys, uuids) — hashing only applies to DB storage
 /** @type {Map<string, object>} serverId → server data */
 const serverCache = new Map();
 /** @type {Map<string, object>} tokenHash → session data */
@@ -251,7 +246,7 @@ async function loadCacheFromDB() {
     console.log('[Cache] Loading data from Astra DB...');
 
     // Load servers (all pages, max 1000 to prevent OOM)
-    // DB stores hashed api keys — cache stores plaintext (for memory-only mode)
+    // DB stores hashed api keys — cache also stores hashes so comparisons work
     const serverRows = await loadAllPages('servers', 500, 1000);
     for (const row of serverRows) {
         const server = deserializeServer(row);
@@ -300,10 +295,9 @@ async function loadCacheFromDB() {
 // or plaintext values (for freshly registered servers in memory-only mode).
 
 function serializeServer(s) {
-    // s.apiKey is already a hash (stored in cache as hash) — write as-is
     return {
         server_id: s.serverId,
-        api_key: s.apiKey,
+        api_key: hashApiKey(s.apiKey),
         server_name: s.serverName || 'Minecraft Server',
         last_sync: s.lastSync || Date.now(),
         categories_json: JSON.stringify(s.categories || []),
@@ -321,7 +315,7 @@ function deserializeServer(row) {
     try { items = JSON.parse(row.items_json || '{}'); } catch {}
     return {
         serverId: row.server_id,
-        apiKey: row.api_key, // Hashed in DB — stored as-is in cache
+        apiKey: row.api_key, // Already hashed in DB and cache
         serverName: row.server_name,
         lastSync: row.last_sync,
         categories,
@@ -471,7 +465,7 @@ app.post('/api/register', async (req, res) => {
             console.log(`[Register] Authorized key rotation for ${serverId}`);
             // Update to new key (store plaintext in cache for memory-only mode,
             // hash will be applied on DB write)
-            existing.apiKey = apiKey; // Store plaintext in cache
+            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             if (ASTRA_TOKEN) {
@@ -520,7 +514,7 @@ app.post('/api/register', async (req, res) => {
             }
 
             console.log(`[Register] DB API key updated for ${serverId} (authorized key rotation)`);
-            existing.apiKey = apiKey; // Store plaintext in cache — serializeServer hashes on DB write
+            existing.apiKey = hashApiKey(apiKey); // Store hash in cache
             existing.serverName = serverName || existing.serverName;
             existing.lastSync = Date.now();
             const updateResult = await astraUpdate('servers', serverId, {
@@ -544,7 +538,7 @@ app.post('/api/register', async (req, res) => {
 
     const server = {
         serverId,
-        apiKey: apiKey, // Store plaintext in cache — serializeServer() hashes on DB write
+        apiKey: hashApiKey(apiKey), // Always store hash in cache — consistent with DB
         lastSync: Date.now(),
         categories: [],
         items: {},
@@ -689,7 +683,6 @@ app.post('/api/session-update', requireApiKey, async (req, res) => {
     // Update all sessions for this player on this server
     // Both cache and DB store hashUuid(playerUuid) — hash the incoming plaintext for comparison
     const hashedUuid = hashUuid(playerUuid);
-    const updates = [];
     for (const [tokenKey, session] of sessionCache) {
         if (session.serverId === req.serverId && session.playerUuid === hashedUuid) {
             session.balances = balances;
@@ -838,6 +831,30 @@ app.get('/api/:serverId/stocks', requireSession, (req, res) => {
 /** GET /api/:serverId/price-history — Browser gets price history for charts */
 app.get('/api/:serverId/price-history', requireSession, (req, res) => {
     res.type('json').send(req.server.priceHistoryJson || '{}');
+});
+
+/** GET /api/:serverId/refresh?page=X — Batch endpoint: returns player + page-specific data in one call */
+app.get('/api/:serverId/refresh', requireSession, (req, res) => {
+    const s = req.session;
+    const page = req.query.page || '';
+    const result = {
+        player: {
+            name: s.playerName,
+            uuid: s.playerUuid,
+            defaultCurrency: s.defaultCurrency,
+            balances: s.balances,
+        },
+    };
+    if (page === 'stocks') {
+        result.stocks = JSON.parse(req.server.stocksJson || '[]');
+        result.priceHistory = JSON.parse(req.server.priceHistoryJson || '{}');
+    } else if (page === 'auction') {
+        result.auctions = JSON.parse(req.server.auctionsJson || '[]');
+        result.categories = req.server.categories || [];
+    } else if (page === 'orders') {
+        result.orders = JSON.parse(req.server.ordersJson || '[]');
+    }
+    res.json(result);
 });
 
 /** POST /api/:serverId/buy — Browser submits a purchase */

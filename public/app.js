@@ -226,6 +226,7 @@ function switchPage(page) {
         refreshCountdown = 20;
         countdownText.textContent = refreshCountdown + 's';
         autoRefreshTimer = setInterval(() => {
+            if (document.hidden) return;
             refreshCountdown--;
             if (refreshCountdown <= 0) { refreshCountdown = 20; refreshCurrentPage(); }
             countdownText.textContent = refreshCountdown + 's';
@@ -237,17 +238,17 @@ function switchPage(page) {
 
 async function refreshCurrentPage() {
     try {
-        const player = await api('/player');
-        if (!player) return;
+        const data = await api(`/refresh?page=${currentPage}`);
+        if (!data || !data.player) return;
+        const player = data.player;
         const defaultBal = player.balances?.[player.defaultCurrency] ?? 0;
         const balEl = document.getElementById('balance-amount');
         if (balEl) balEl.textContent = `${defaultBal.toLocaleString()} ${player.defaultCurrency}`;
 
         switch (currentPage) {
             case 'stocks': {
-                const [stocks, history] = await Promise.all([api('/stocks'), api('/price-history')]);
-                stocksData = stocks;
-                priceHistory = history || {};
+                stocksData = data.stocks || [];
+                priceHistory = data.priceHistory || {};
                 const q = document.getElementById('stocks-search')?.value?.toLowerCase() || '';
                 const sorted = getSortedStocks();
                 const filtered = q ? sorted.filter(s => s.name.toLowerCase().includes(q)) : sorted;
@@ -255,13 +256,11 @@ async function refreshCurrentPage() {
                 break;
             }
             case 'auction': {
-                const auctions = await api('/auctions');
+                const auctions = data.auctions;
                 if (!auctions) break;
                 auctionData = auctions;
-                // Re-render category counts
-                const cats = await api('/categories');
+                const cats = data.categories;
                 if (cats) renderAuctionCategories(cats);
-                // Re-apply current filter
                 if (currentAuctionCategory) {
                     let filtered;
                     if (currentAuctionCategory === '__all') filtered = auctions;
@@ -275,7 +274,7 @@ async function refreshCurrentPage() {
                 break;
             }
             case 'orders': {
-                const orders = await api('/orders');
+                const orders = data.orders;
                 if (!orders) break;
                 renderOrders(orders);
                 break;
@@ -286,6 +285,7 @@ async function refreshCurrentPage() {
 
 let balanceRefreshTimer = setInterval(async () => {
     if (document.hidden || !TOKEN) return;
+    if (['auction', 'orders', 'stocks'].includes(currentPage)) return;
     try {
         const player = await api('/player');
         if (!player) return;
@@ -1058,7 +1058,7 @@ function openStockChart(key, name, material, buyPrice, sellPrice, change, curren
             <div class="chart-modal-header">
                 <h3>
                     <img src="${getItemIconUrl(material || 'stone')}" onerror="handleItemIconError(this, '${escJs(material || 'stone')}', true)" alt="">
-                    ${esc(name)}
+                    ${name}
                 </h3>
                 <button class="chart-modal-close" onclick="this.closest('.chart-modal-overlay').remove()">
                     <svg class="icon" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
@@ -1259,10 +1259,10 @@ function showToast(type, msg) {
 
 function esc(str) {
     return String(str)
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
+        .replace(/&/g, '&')
+        .replace(/</g, '<')
+        .replace(/>/g, '>')
+        .replace(/"/g, '"')
         .replace(/'/g, '&#39;')
         .replace(/`/g, '&#96;');
 }

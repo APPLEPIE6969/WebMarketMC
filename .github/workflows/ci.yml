@@ -57,64 +57,144 @@ jobs:
             sleep 1
           done
 
-      - name: Test registration
+      - name: Test registration (new server, with apiKey + secret)
         run: |
           curl -sf -X POST http://localhost:3000/api/register \
             -H "Content-Type: application/json" \
-            -d '{"serverId":"test-server","serverName":"Test Server"}' | jq -e '.apiKey'
+            -H "x-registration-secret: test-secret" \
+            -d '{"serverId":"test-server","serverName":"Test Server","apiKey":"test-key-123"}' | jq -e '.success'
 
-      - name: Test sync endpoint
+      - name: Test sync endpoint (with apiKey)
         run: |
           curl -sf -X POST http://localhost:3000/api/sync \
             -H "Content-Type: application/json" \
-            -H "x-api-key: test-key" \
-            -d '{"categories":[],"items":[],"auctions":[],"orders":[],"stocks":[],"priceHistory":{}}' | jq -e '.ok'
+            -H "x-api-key: test-key-123" \
+            -d '{"serverId":"test-server","categories":[],"items":[],"auctions":[],"orders":[],"stocks":[],"priceHistory":{}}' | jq -e '.success'
 
-      - name: Test session creation
+      - name: Test session creation (plugin provides token)
         run: |
           curl -sf -X POST http://localhost:3000/api/session \
             -H "Content-Type: application/json" \
-            -d '{"serverId":"test-server","playerUuid":"123e4567-e89b-12d3-a456-426614174000","playerName":"TestPlayer"}' | jq -e '.sessionToken'
+            -H "x-api-key: test-key-123" \
+            -d '{"token":"test-session-token","serverId":"test-server","playerUuid":"123e4567-e89b-12d3-a456-426614174000","playerName":"TestPlayer","balances":{"Aurels":500},"defaultCurrency":"Aurels"}' | jq -e '.success'
 
       - name: Test session update
         run: |
           curl -sf -X POST http://localhost:3000/api/session-update \
             -H "Content-Type: application/json" \
-            -d '{"serverId":"test-server","playerUuid":"123e4567-e89b-12d3-a456-426614174000","balances":{"Aurels":500}}' | jq -e '.ok'
+            -H "x-api-key: test-key-123" \
+            -d '{"serverId":"test-server","playerUuid":"123e4567-e89b-12d3-a456-426614174000","balances":{"Aurels":450}}' | jq -e '.success'
 
-      - name: Test purchase creation (buy)
+      - name: Test buy (browser endpoint, Bearer auth)
         run: |
-          curl -sf -X POST http://localhost:3000/api/purchase \
+          curl -sf -X POST http://localhost:3000/api/test-server/buy \
             -H "Content-Type: application/json" \
-            -d '{"sessionToken":"test-token","type":"buy","itemKey":"DIAMOND","amount":10,"totalCost":100}' | jq -e '.ok'
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"item":"DIAMOND","amount":10}' | jq -e '.success'
 
-      - name: Test purchase creation (bid)
+      - name: Test bid (browser endpoint, Bearer auth)
         run: |
-          curl -sf -X POST http://localhost:3000/api/purchase \
+          curl -sf -X POST http://localhost:3000/api/test-server/bid \
             -H "Content-Type: application/json" \
-            -d '{"sessionToken":"test-token","type":"bid","auctionId":1,"amount":50}' | jq -e '.ok'
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"auctionId":1,"amount":50}' | jq -e '.success'
 
-      - name: Test purchase creation (fill_order)
+      - name: Test fill-order (browser endpoint, Bearer auth)
         run: |
-          curl -sf -X POST http://localhost:3000/api/purchase \
+          curl -sf -X POST http://localhost:3000/api/test-server/fill-order \
             -H "Content-Type: application/json" \
-            -d '{"sessionToken":"test-token","type":"fill_order","orderId":1,"amount":5}' | jq -e '.ok'
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"orderId":1,"amount":5}' | jq -e '.success'
 
-      - name: Test invalid bid (non-numeric)
+      - name: Test invalid bid (non-numeric amount)
         run: |
-          curl -sf -X POST http://localhost:3000/api/purchase \
+          curl -s -X POST http://localhost:3000/api/test-server/bid \
             -H "Content-Type: application/json" \
-            -d '{"sessionToken":"test-token","type":"bid","auctionId":1,"amount":"abc"}' | jq -e '.error'
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"auctionId":1,"amount":"abc"}' | jq -e '.error'
 
-      - name: Test invalid orderId (non-integer)
+      - name: Test invalid fill-order (non-integer orderId)
         run: |
-          curl -sf -X POST http://localhost:3000/api/purchase \
+          curl -s -X POST http://localhost:3000/api/test-server/fill-order \
             -H "Content-Type: application/json" \
-            -d '{"sessionToken":"test-token","type":"fill_order","orderId":"abc","amount":5}' | jq -e '.error'
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"orderId":"abc","amount":5}' | jq -e '.error'
 
-      - name: Test get pending purchases (IDOR check)
+      - name: Test purchase-status (IDOR check — own purchase)
         run: |
-          curl -sf -X GET "http://localhost:3000/api/pending-purchases?serverId=test-server&sessionToken=test-token" | jq -e '.purchases | length == 0'
+          BUY_RESP=$(curl -sf -X POST http://localhost:3000/api/test-server/buy \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"item":"IRON_INGOT","amount":1}')
+          PURCHASE_ID=$(echo "$BUY_RESP" | jq -r '.purchaseId')
+          curl -sf "http://localhost:3000/api/test-server/purchase-status?id=$PURCHASE_ID" \
+            -H "Authorization: Bearer test-session-token" | jq -e '.status'
+
+      - name: Test confirm-purchase (plugin endpoint)
+        run: |
+          BUY_RESP=$(curl -sf -X POST http://localhost:3000/api/test-server/buy \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer test-session-token" \
+            -d '{"item":"GOLD_INGOT","amount":1}')
+          PURCHASE_ID=$(echo "$BUY_RESP" | jq -r '.purchaseId')
+          curl -sf -X POST http://localhost:3000/api/confirm-purchase \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: test-key-123" \
+            -d "{\"purchaseId\":\"$PURCHASE_ID\",\"success\":true,\"newBalance\":{\"Aurels\":400},\"spent\":50}" | jq -e '.success'
+
+      - name: Test unauthorized sync (wrong apiKey)
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/sync \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: wrong-key" \
+            -d '{"categories":[]}')
+          echo "HTTP status: $CODE"
+          [ "$CODE" = "401" ]
+
+      - name: Test unauthorized buy (no Bearer token)
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST http://localhost:3000/api/test-server/buy \
+            -H "Content-Type: application/json" \
+            -d '{"item":"DIAMOND","amount":1}')
+          echo "HTTP status: $CODE"
+          [ "$CODE" = "401" ]
+
+      - name: Test batch refresh endpoint (stocks page)
+        run: |
+          REFRESH=$(curl -sf "http://localhost:3000/api/test-server/refresh?page=stocks" \
+            -H "Authorization: Bearer test-session-token")
+          echo "$REFRESH" | jq -e '.player'
+          echo "$REFRESH" | jq -e '.player.name == "TestPlayer"'
+          echo "$REFRESH" | jq -e '.stocks'
+          echo "$REFRESH" | jq -e '.priceHistory'
+
+      - name: Test batch refresh endpoint (auction page)
+        run: |
+          REFRESH=$(curl -sf "http://localhost:3000/api/test-server/refresh?page=auction" \
+            -H "Authorization: Bearer test-session-token")
+          echo "$REFRESH" | jq -e '.player'
+          echo "$REFRESH" | jq -e '.auctions'
+          echo "$REFRESH" | jq -e '.categories'
+
+      - name: Test batch refresh endpoint (orders page)
+        run: |
+          REFRESH=$(curl -sf "http://localhost:3000/api/test-server/refresh?page=orders" \
+            -H "Authorization: Bearer test-session-token")
+          echo "$REFRESH" | jq -e '.player'
+          echo "$REFRESH" | jq -e '.orders'
+
+      - name: Test refresh rejects no auth
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://localhost:3000/api/test-server/refresh?page=stocks")
+          echo "HTTP status: $CODE"
+          [ "$CODE" = "401" ]
+
+      - name: Test admin delete (requires REGISTRATION_SECRET)
+        run: |
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" -X DELETE http://localhost:3000/api/servers/test-server \
+            -H "x-registration-secret: test-secret")
+          echo "HTTP status: $CODE"
+          [ "$CODE" = "200" ]
 
       - name: Stop server
         if: always()
@@ -149,15 +229,12 @@ jobs:
             
             function apiKeyMatches(plaintext, stored) {
               if (!plaintext || !stored) return false;
-              // If stored is a 64-char hex string (SHA256 hash), compare hash(plaintext) === stored
               if (/^[a-f0-9]{64}$/.test(stored)) {
                 return hashApiKey(plaintext) === stored;
               }
-              // Otherwise stored is plaintext (memory-only mode) — direct comparison
               return plaintext === stored;
             }
 
-            // Test 1: Same input always produces same hash (deterministic)
             const key1 = 'a3f7b2c1d9e8';
             const key2 = 'a3f7b2c1d9e8';
             const hash1 = hashApiKey(key1);
@@ -165,38 +242,29 @@ jobs:
             console.log('Deterministic:', hash1 === hash2);
             if (hash1 !== hash2) { console.error('FAIL: Same key produced different hashes'); process.exit(1); }
 
-            // Test 2: Different inputs produce different hashes
             const hash3 = hashApiKey('different-key');
             console.log('Distinct:', hash1 !== hash3);
             if (hash1 === hash3) { console.error('FAIL: Different keys produced same hash'); process.exit(1); }
 
-            // Test 3: Hash is not reversible (64 hex chars, no plaintext leakage)
             console.log('Hash length:', hash1.length);
             console.log('Is hex:', /^[0-9a-f]{64}$/.test(hash1));
             if (!/^[0-9a-f]{64}$/.test(hash1)) { console.error('FAIL: Hash is not valid SHA256 hex'); process.exit(1); }
 
-            // Test 4: apiKeyMatches with hash stored (production mode) — compares hash(plaintext) === stored hash
             console.log('Match hash (prod mode):', apiKeyMatches('a3f7b2c1d9e8', hash1));
             if (!apiKeyMatches('a3f7b2c1d9e8', hash1)) { console.error('FAIL: hash match failed'); process.exit(1); }
 
-            // Test 5: apiKeyMatches with plaintext stored (memory-only mode) — direct comparison
             console.log('Match plaintext (memory mode):', apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8'));
             if (!apiKeyMatches('a3f7b2c1d9e8', 'a3f7b2c1d9e8')) { console.error('FAIL: plaintext should match plaintext in memory mode'); process.exit(1); }
 
-            // Test 6: Reject mismatch in both modes
             console.log('Reject mismatch (prod):', !apiKeyMatches('wrong-key', hash1));
             if (apiKeyMatches('wrong-key', hash1)) { console.error('FAIL: wrong key matched in prod mode'); process.exit(1); }
             console.log('Reject mismatch (memory):', !apiKeyMatches('wrong-key', 'a3f7b2c1d9e8'));
             if (apiKeyMatches('wrong-key', 'a3f7b2c1d9e8')) { console.error('FAIL: wrong key matched in memory mode'); process.exit(1); }
 
-            // Test 7: Hash replay attack — sending a stored hash as x-api-key must NOT authenticate
-            // When stored is a hash, apiKeyMatches(hash, hash) computes hash(hash) === hash = false
             console.log('Reject hash replay (prod):', !apiKeyMatches(hash1, hash1));
             if (apiKeyMatches(hash1, hash1)) { console.error('FAIL: hash replay accepted in prod mode'); process.exit(1); }
 
-            // Test 8: No ENCRYPTION_KEY needed — hashing only uses SHA256 built-in
             console.log('No env var needed: true');
-
             console.log('All hashing tests passed!');
           "
 
@@ -215,35 +283,3 @@ jobs:
           echo "FAIL: Server did not start"
           kill $SERVER_PID
           exit 1
-
-  # This job is skipped when ASTRA_TOKEN is not set (memory-only mode)
-  # Uncomment and configure when you have Astra credentials in repo secrets
-  # astra-integration-test:
-  #   runs-on: ubuntu-latest
-  #   if: ${{ secrets.ASTRA_TOKEN != '' }}
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #       with:
-  #         persist-credentials: false
-  #     - name: Setup Node.js 24
-  #       uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '24'
-  #         cache: 'npm'
-  #     - name: Install dependencies
-  #       run: npm ci
-  #     - name: Run integration test with Astra
-  #       env:
-  #         ASTRA_TOKEN: ${{ secrets.ASTRA_TOKEN }}
-  #         ASTRA_DB_ID: ${{ secrets.ASTRA_DB_ID }}
-  #         ASTRA_REGION: ${{ secrets.ASTRA_REGION }}
-  #         ASTRA_KEYSPACE: ${{ secrets.ASTRA_KEYSPACE }}
-  #         ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
-  #         REGISTRATION_SECRET: ${{ secrets.REGISTRATION_SECRET }}
-  #       run: |
-  #         node server.js &
-  #         SERVER_PID=$!
-  #         sleep 5
-  #         # Run integration tests...
-  #         kill $SERVER_PID
